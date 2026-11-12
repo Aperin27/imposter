@@ -2,6 +2,18 @@
 
 A mobile-first party game for 3–12 people playing together in person. Everyone gets a private question, one person gets a related alternative, and nobody is told their role. Compare answers, discuss, then let the host reveal the truth.
 
+## CASE FILE interface — Stage 3
+
+The frontend uses an investigation-dossier design: charcoal desk, warm paper, signal red, muted gold, suspect profiles, confidential assignments, sealed statements, evidence cards and a public case verdict. The illustration is original SVG; the locally served Barlow/Barlow Condensed WOFF2 files include their SIL Open Font License under `public/fonts/`. No font CDN, image service, animation library or additional package is used.
+
+Controls have consistent hover/pressed/focus/disabled feedback, touch-sized targets, safe-area spacing, reduced-motion overrides and native dialog focus management. Modal entrances and supported native discrete exits use CSS; closing never waits for an animation before applying an action. Result animation is cosmetic: identity and both questions render only from an authorized public server result.
+
+The backend, protocol, sessionStorage recovery, invite URL logic, rate limits and Durable Object storage are unchanged by this redesign. See [the design contract](docs/STAGE3_DESIGN.md) and [Stage 3 verification notes](docs/STAGE3_QA.md) for files, checks and limitations.
+
+To review locally, run `npm.cmd run dev` on Windows and open the printed URL in three fresh tabs. Create a room, join two players (or use Show QR Code → Copy Invite Link), start, submit all three statements, discuss, confirm Reveal Imposter, and select Next round. Refresh after submitting to verify recovery. Check Tab/Shift+Tab/Escape in dialogs and try phone-width views. Do not scan a localhost QR from another device; use the LAN origin or your eventual public HTTPS origin.
+
+Run the normal checks plus `node scripts/check-design.mjs` for palette contrast and CSS safeguards. No Git or publishing actions are performed by these local checks.
+
 ## Start locally
 
 Requires **Node.js 22.12+ (Node 24 LTS recommended)** and npm. Dependencies are installed and locked in `package-lock.json`.

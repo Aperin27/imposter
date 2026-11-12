@@ -107,6 +107,25 @@ describe('QR invites and joining', () => {
 });
 
 describe('dialog and notice stability', () => {
+  it('wraps Tab and Shift+Tab within the modal controls', () => {
+    render(<Confirm title="Confirm" message="Public action" confirm="Reveal" onConfirm={vi.fn()} onCancel={vi.fn()} disabled={false} />);
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    const confirm = screen.getByRole('button', { name: 'Reveal' });
+    confirm.focus(); fireEvent.keyDown(confirm, { key: 'Tab' }); expect(document.activeElement).toBe(cancel);
+    fireEvent.keyDown(cancel, { key: 'Tab', shiftKey: true }); expect(document.activeElement).toBe(confirm);
+  });
+  it('closes a retained native modal immediately and never reopens it on ordinary rerenders', () => {
+    const props = { title: 'Confirm', message: 'First', confirm: 'Reveal', onConfirm: vi.fn(), onCancel: vi.fn(), disabled: false };
+    const { rerender } = render(<Confirm {...props} open />);
+    const opens = vi.mocked(HTMLDialogElement.prototype.showModal).mock.calls.length;
+    rerender(<Confirm {...props} open={false} />);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.body.style.overflow).toBe('');
+    rerender(<Confirm {...props} open={false} message="A clock or roster update" />);
+    expect(vi.mocked(HTMLDialogElement.prototype.showModal).mock.calls).toHaveLength(opens);
+    rerender(<Confirm {...props} open />);
+    expect(vi.mocked(HTMLDialogElement.prototype.showModal).mock.calls).toHaveLength(opens + 1);
+  });
   it('keeps a modal mounted and focused across parent rerenders, then restores focus on close', () => {
     const trigger = document.createElement('button'); trigger.textContent = 'Trigger'; document.body.appendChild(trigger); trigger.focus();
     const props = { title: 'Confirm', message: 'First', confirm: 'Reveal', onConfirm: vi.fn(), onCancel: vi.fn(), disabled: false };
@@ -147,5 +166,73 @@ describe('dialog and notice stability', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Remove offline player Blair' }));
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove offline player' }));
     expect(send).toHaveBeenCalledWith({ type: 'removeOffline', playerId: 'other', disconnectedAt: T - 90_000 });
+  });
+});
+
+describe('CASE FILE gameplay presentation', () => {
+  const normalQuestion = 'Private question only for this player?';
+  const otherQuestion = 'A different private question?';
+  function playing(): RoomView {
+    const state = room();
+    return { ...state, phase: 'answering', roundNumber: 1,
+      question: normalQuestion, participantIds: ['host', 'other', 'third'], answerDeadline: T + 90_000, roundDeadline: T + 1_200_000,
+      players: [...state.players.map(p => ({ ...p, connected: true, disconnectedAt: null })),
+        { id: 'third', nickname: 'Casey', connected: true, left: false, submitted: false }] };
+  }
+  const reveal = { imposterId: 'other', imposterName: 'Blair', normalQuestion, imposterQuestion: otherQuestion,
+    reason: 'host' as const, revealedBy: 'Alex' };
+  it('runs home → create → lobby → private answer → discussion → server reveal → next round', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(T);
+    const { rerender } = render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Create Room' }));
+    const nickname = screen.getByLabelText('Your nickname'); fireEvent.change(nickname, { target: { value: 'Alex' } });
+    await act(async () => fireEvent.submit(nickname.closest('form')!));
+    const state = playing(); withRoom({ ...state, phase: 'lobby' }); rerender(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Start round' })); expect(send).toHaveBeenLastCalledWith({ type: 'start' });
+    withRoom(state); rerender(<App />);
+    expect(screen.getByRole('heading', { name: normalQuestion })).toBeTruthy();
+    expect(screen.queryByText(otherQuestion)).toBeNull(); expect(screen.queryByText('THE IMPOSTER WAS…')).toBeNull();
+    expect(screen.getByRole('timer', { name: 'Answer time remaining' }).textContent).toContain('1:30');
+    fireEvent.change(screen.getByLabelText('Your answer'), { target: { value: 'Seven' } });
+    fireEvent.submit(screen.getByLabelText('Your answer').closest('form')!);
+    expect(send).toHaveBeenLastCalledWith({ type: 'answer', answer: 'Seven', round: 1 });
+    withRoom({ ...state, yourAnswer: 'Seven', players: state.players.map(p => ({ ...p, submitted: p.id === 'host' })) }); rerender(<App />);
+    expect(screen.getByText(/STATEMENT.*SEALED/)).toBeTruthy(); expect(screen.queryByLabelText('Your answer')).toBeNull();
+    const answers = [{ playerId: 'host', nickname: 'Alex', answer: 'Seven' }, { playerId: 'other', nickname: 'Blair', answer: 'Eight' }, { playerId: 'third', nickname: 'Casey', answer: null }];
+    const discussion = { ...state, phase: 'discussion' as const, question: null, answers };
+    withRoom(discussion); rerender(<App />);
+    expect(screen.getByText('Eight')).toBeTruthy(); expect(screen.getByText('No answer')).toBeTruthy();
+    expect(screen.queryByText(normalQuestion)).toBeNull(); expect(screen.queryByText(otherQuestion)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Reveal Imposter' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Reveal to everyone' }));
+    expect(send).toHaveBeenLastCalledWith({ type: 'reveal', round: 1 });
+    expect(screen.queryByText('THE IMPOSTER WAS…')).toBeNull();
+    withRoom({ ...discussion, phase: 'revealed', reveal }); rerender(<App />);
+    expect(screen.getByRole('heading', { name: 'Blair' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: normalQuestion })).toBeTruthy(); expect(screen.getByRole('heading', { name: otherQuestion })).toBeTruthy();
+    expect(screen.getByText('Seven')).toBeTruthy(); expect(screen.getByText('Eight')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Next round' })); expect(send).toHaveBeenLastCalledWith({ type: 'start' });
+    withRoom({ ...state, roundNumber: 2, question: 'A fresh assignment?' }); rerender(<App />);
+    expect(screen.getByRole('heading', { name: 'A fresh assignment?' })).toBeTruthy();
+    expect((screen.getByLabelText('Your answer') as HTMLInputElement).value).toBe(''); expect(screen.queryByText('Eight')).toBeNull();
+  });
+  it('does not display a verdict or role styling outside the server-authorized reveal phase', () => {
+    savePlayer(); const state = playing();
+    withRoom({ ...state, phase: 'discussion', answers: [{ playerId: 'other', nickname: 'Blair', answer: 'Eight' }], reveal });
+    const { container, rerender } = render(<App />);
+    expect(screen.queryByText('THE IMPOSTER WAS…')).toBeNull(); expect(container.querySelector('.imposter-answer')).toBeNull();
+    expect(screen.queryByRole('heading', { name: otherQuestion })).toBeNull();
+    withRoom({ ...state, phase: 'revealed', reveal: null }); rerender(<App />);
+    expect(screen.queryByText('THE IMPOSTER WAS…')).toBeNull(); expect(screen.getByText(/Receiving the verdict/)).toBeTruthy();
+  });
+  it('does not reopen the invitation after another game transition or host loss', () => {
+    savePlayer(); const state = playing(); withRoom({ ...state, phase: 'lobby' });
+    const { rerender } = render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Show QR Code' })); expect(screen.getByRole('dialog')).toBeTruthy();
+    withRoom(state); rerender(<App />); expect(screen.queryByRole('dialog')).toBeNull();
+    withRoom({ ...state, phase: 'revealed', reveal }); rerender(<App />); expect(screen.queryByRole('dialog')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show QR Code' }));
+    withRoom({ ...state, phase: 'revealed', reveal, hostId: 'other' }); rerender(<App />);
+    expect(screen.queryByRole('dialog')).toBeNull(); expect(screen.queryByRole('button', { name: 'Next round' })).toBeNull();
   });
 });

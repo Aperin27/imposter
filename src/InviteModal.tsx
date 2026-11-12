@@ -3,7 +3,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { inviteLink } from './invites';
 import { Modal } from './Modal';
 
-export function InviteModal({ code, onClose }: { code: string; onClose: () => void }) {
+export function InviteModal({ code, onClose, open = true }: { code: string; onClose: () => void; open?: boolean }) {
   const link = inviteLink(window.location.origin, code);
   const [copyStatus, setCopyStatus] = useState('');
   useEffect(() => {
@@ -15,9 +15,10 @@ export function InviteModal({ code, onClose }: { code: string; onClose: () => vo
     try { await navigator.clipboard.writeText(link); setCopyStatus('Invite link copied.'); }
     catch { setCopyStatus('Clipboard unavailable. Select and copy the link below.'); }
   }
-  return <Modal title="Bring your people." onCancel={onClose} className="invite-dialog">
+  return <Modal title="An invitation to the case." onCancel={onClose} className="invite-dialog" open={open}>
     <button className="modal-close text-button" aria-label="Close QR code" data-initial-focus onClick={onClose}>✕</button>
-    <p className="muted">Scan to join the room. Everyone still chooses a nickname before joining.</p>
+    <span className="invitation-classification">CLASSIFIED / INVITED EYES ONLY</span>
+    <p className="muted">Scan to take your place. Choose a nickname, then join the investigation.</p>
     <div className="qr-frame"><QRCodeSVG value={link} size={280} level="M" marginSize={4}
       bgColor="#ffffff" fgColor="#101218" title={`Join Imposter room ${code}`} /></div>
     <div className="invite-room-code" aria-label={`Room code ${code}`}>{code}</div>

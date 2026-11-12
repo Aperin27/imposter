@@ -2,13 +2,20 @@
 
 | Path | Responsibility |
 | --- | --- |
-| `src/App.tsx` | Home/invite entry, create/join, lobby, answering/waiting, discussion, final reveal and offline-removal roster |
+| `src/App.tsx` | CASE FILE home/registration, existing client actions, room shell, notices and modal state |
+| `src/CaseArtwork.tsx` | Original decorative SVG dossier, fingerprint and arrow artwork; independent of player/role data |
+| `src/RoundScreens.tsx` | Presentational lobby, confidential assignment, sealed answer, public evidence and server-authorized verdict |
+| `src/PlayerRoster.tsx` | Stable suspect profiles, connection/host status and existing offline-removal controls |
+| `src/formatTime.ts` | Shared display-only formatting of server deadlines; no timer authority |
 | `src/invites.ts` | Validated public invite links and existing-session explanations |
 | `src/InviteModal.tsx` | Locally generated QR, visible room code, invite link and clipboard handling |
-| `src/Modal.tsx` | Stable native dialog lifecycle, confirmations and focus restoration |
+| `src/Modal.tsx` | Stable native dialog lifecycle, focus loop/restoration and retained closing transitions |
 | `src/RoomNotice.tsx` | Temporary server-timestamped host/removal notices |
 | `src/useRoom.ts` | Per-tab credential persistence, API calls, reconnect backoff, socket takeover, heartbeat and action status |
-| `src/style.css` | Dark responsive UI, touch-sized controls, focus and reduced-motion styles |
+| `src/style.css` | CASE FILE tokens, paper/charcoal surfaces, responsive compositions, interaction states and reduced motion |
+| `public/fonts/` | Self-hosted Barlow fonts, SIL OFL license and provenance |
+| `public/favicon.svg` | Original redacted-zero app icon |
+| `scripts/check-design.mjs` | Dependency-free palette contrast and CSS safeguard checks |
 | `shared/protocol.ts` | Explicit player-visible state and permitted wire actions; no backend secrets |
 | `worker/index.ts` | Same-origin API router, request validation, Durable Object persistence, hibernating sockets and alarms |
 | `worker/game.ts` | Authoritative rules, lazy room upgrades, offline removal/revocation, host succession, time transitions and filtered views |

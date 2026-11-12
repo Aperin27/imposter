@@ -1,15 +1,15 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { OFFLINE_REMOVAL_MS, type PublicPlayer, type RoomView, type Session } from '../shared/protocol';
+import { OFFLINE_REMOVAL_MS, type PublicPlayer, type Session } from '../shared/protocol';
 import { ApiError, getSession, newToken, post, saveSession, useRoom } from './useRoom';
 import { existingSessionMessage, readInvite } from './invites';
 import { InviteModal } from './InviteModal';
 import { Confirm } from './Modal';
 import { RoomNotice } from './RoomNotice';
+import { Arrow, CaseArtwork, Fingerprint } from './CaseArtwork';
+import { PlayerRoster } from './PlayerRoster';
+import { RoundScreens } from './RoundScreens';
+import { formatTime } from './formatTime';
 
-function formatTime(deadline: number | null, now: number) {
-  const seconds = Math.max(0, Math.ceil(((deadline ?? now) - now) / 1000));
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
-}
 export function App() {
   const [session, setSession] = useState<Session | null>(getSession);
   const [invite] = useState(() => readInvite(window.location.search));
@@ -24,21 +24,34 @@ export function App() {
   const [confirmLeave, setConfirmLeave] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [removePlayer, setRemovePlayer] = useState<PublicPlayer | null>(null);
+  const [removeOpen, setRemoveOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const exit = () => { saveSession(null); setSession(null); setMode(invite.code && !inviteDismissed ? 'join' : 'home'); setConfirmLeave(false); setConfirmReveal(false); setShowInvite(false); setRemovePlayer(null); };
+  const exit = () => { saveSession(null); setSession(null); setMode(invite.code && !inviteDismissed ? 'join' : 'home'); setConfirmLeave(false); setConfirmReveal(false); setShowInvite(false); setRemovePlayer(null); setRemoveOpen(false); };
   const { room, connection, error, setError, pending, send, clockOffset } = useRoom(session, exit);
-  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
+  useEffect(() => {
+    if (!session) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [session]);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
   useEffect(() => { setNow(Date.now()); }, [room?.serverNow]);
   useEffect(() => { setAnswer(''); setConfirmReveal(false); }, [room?.roundNumber, room?.phase]);
   const serverNow = now + clockOffset;
   const connected = connection === 'Connected';
   const isHost = !!room && room.hostId === room.you;
-  const me = room?.players.find(p => p.id === room.you);
   const activePlayers = room?.players.filter(p => !p.left) ?? [];
   const onlineCount = activePlayers.filter(p => p.connected).length;
   const busy = pending || !connected;
   const canInvite = isHost && (room?.phase === 'lobby' || room?.phase === 'revealed');
+  useEffect(() => { if (!canInvite) setShowInvite(false); }, [canInvite]);
+  useEffect(() => {
+    if (!isHost) { setConfirmReveal(false); setRemoveOpen(false); }
+  }, [isHost]);
   const removalTarget = room?.players.find(player => player.id === removePlayer?.id && !player.left);
   const removalStillValid = !!removalTarget && !removalTarget.connected
     && removalTarget.disconnectedAt === removePlayer?.disconnectedAt
@@ -66,126 +79,76 @@ export function App() {
     } finally { setLoading(false); }
   }
   async function copyCode() {
-    try { await navigator.clipboard.writeText(session!.code); setCopied(true); setTimeout(() => setCopied(false), 2000); }
+    try { await navigator.clipboard.writeText(session!.code); setCopied(true); }
     catch { setError(`Copy this room code: ${session!.code}`); }
   }
   return <div className="app-shell">
+    <a className="skip-link" href="#main-content">Skip to main content</a>
     <header className="topbar">
-      <a className="wordmark" href="/" aria-label="Imposter home">IMP<span>0</span>STER<span className="logo-dot">.</span></a>
-      <span className="top-label">A GAME OF QUESTIONABLE TRUST</span>
-      {session && <button className="text-button" onClick={() => setConfirmLeave(true)}>Leave room <span aria-hidden="true">↗</span></button>}
+      <a className="wordmark" href="/" aria-label="Imposter home">IMP<span className="wordmark-zero">0</span>STER<span className="wordmark-square" /></a>
+      <span className="top-label">A SOCIAL DECEPTION CASE FILE</span>
+      {session ? <button className="text-button leave-button" onClick={() => setConfirmLeave(true)}>Leave room <Arrow direction="up" /></button>
+        : <span className="header-edition"><span className="status-dot" /> TRUST UNDER REVIEW</span>}
     </header>
-    <main>
+    <main id="main-content" tabIndex={-1}>
       {!inviteDismissed && (invite.error || (session && invite.code)) && <div className="notice invite-notice" role="status">
         <span>{invite.error ?? existingSessionMessage(session!, invite.code!)}</span>
         <button className="text-button" onClick={() => setInviteDismissed(true)} aria-label="Dismiss invite notice">Dismiss</button>
       </div>}
       {!session ? <>
-        {mode === 'home' ? <section className="home">
-          <div className="eyebrow"><span className="live-dot" /> SAME ROOM. DIFFERENT STORIES.</div>
-          <h1>You know<br />your friends.<br /><span>Or do you?</span></h1>
-          <p className="lead">Everyone gets a question. One gets a different one.<br className="desktop-break" /> Spot the imposter hiding in plain sight.</p>
-          <div className="home-actions">
-            <button className="primary" onClick={() => { setMode('create'); setFormError(''); }}>Create Room <span aria-hidden="true">↗</span></button>
-            <button className="secondary" onClick={() => { setMode('join'); setFormError(''); }}>Join Room <span aria-hidden="true">→</span></button>
+        {mode === 'home' ? <section className="home screen-enter">
+          <div className="hero"><div className="hero-copy">
+            <div className="eyebrow hero-kicker"><span className="crosshair" aria-hidden="true">+</span> SAME FRIENDS. DIFFERENT STORIES.</div>
+            <h1>Every friend.<br /><span>A suspect.</span></h1>
+            <p className="lead">You all get a question. One of you gets a different one.<br className="desktop-break" /> The answers are evidence. The rest is a very good lie.</p>
+            <div className="home-actions"><button className="primary" onClick={() => { setMode('create'); setFormError(''); }}>Create Room <Arrow direction="up" /></button>
+              <button className="secondary" onClick={() => { setMode('join'); setFormError(''); }}>Join Room <Arrow /></button></div>
+            <div className="game-facts"><span>3–12 PLAYERS</span><span>20 MIN / CASE</span><span>IN PERSON</span></div>
+          </div><CaseArtwork /></div>
+          <div className="how-to" aria-label="How to play"><div><span className="step-number">01</span><div><h2>Make your statement.</h2><p>Answer your private question. Nobody knows their role.</p></div></div>
+            <div><span className="step-number">02</span><div><h2>Follow the evidence.</h2><p>Read everyone’s answers. Question the suspicious ones.</p></div></div>
+            <div><span className="step-number">03</span><div><h2>Close the case.</h2><p>The host reveals the imposter. Friendships may recover.</p></div></div></div>
+        </section> : <section className="entry screen-enter">
+          <div className="entry-intro"><button className="text-button back" onClick={() => setMode('home')}>← Back</button><span className="eyebrow">CASE FILE / REGISTRATION</span>
+            <h1>{mode === 'create' ? <>Good friends.<br /><span>Prime suspects.</span></> : <>Consider yourself<br /><span>a person of interest.</span></>}</h1>
+            <p className="lead">{mode === 'create' ? 'Open a case. Invite your people. Someone’s story won’t add up.' : 'Enter the room code, choose your name, and take your place in the investigation.'}</p>
+            <div className="registration-note"><Fingerprint /><span>No accounts. No downloads.<br />Just a little reasonable doubt.</span></div>
           </div>
-          <div className="game-facts"><span>03—12 PLAYERS</span><span>20 MIN / ROUND</span><span>ZERO DOWNLOADS</span></div>
-          <div className="how-to"><div><b>01</b><h3>Answer privately</h3><p>Keep your question to yourself. Nobody knows their role.</p></div><div><b>02</b><h3>Read the room</h3><p>Answers go public. Compare, question, and make your case.</p></div><div><b>03</b><h3>Reveal the imposter</h3><p>The host reveals the truth. Trust issues are optional.</p></div></div>
-        </section> : <section className="entry narrow">
-          <button className="text-button back" onClick={() => setMode('home')}>← Back</button>
-          <div className="eyebrow">GET EVERYONE TOGETHER</div>
-          <h1>{mode === 'create' ? <>Make some<br /><span>suspicions.</span></> : <>Got a code?<br /><span>You’re in.</span></>}</h1>
-          <p className="muted">{mode === 'create' ? 'Create a room and share the code with your friends.' : 'Ask your host for the six-character room code.'}</p>
-          <form className="card entry-form" onSubmit={enter}>
-            <label htmlFor="nickname">Your nickname</label>
-            <input id="nickname" autoComplete="nickname" autoFocus maxLength={24} required placeholder="What should we call you?" value={name} onChange={e => setName(e.target.value)} />
-            {mode === 'join' && <><label htmlFor="room-code">Room code</label><input className="code-input" id="room-code" autoComplete="off" minLength={6} maxLength={6} pattern="[A-Za-z2-9]{6}" required placeholder="ABC123" value={code} onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ''))} /></>}
-            {formError && <p className="error" role="alert">{formError}</p>}
-            <button className="primary full" disabled={loading}>{loading ? 'Getting your room…' : mode === 'create' ? 'Create Room ↗' : 'Join Room →'}</button>
+          <form className="paper entry-form" onSubmit={enter} aria-busy={loading}>
+            <div className="document-header"><span>PERSONNEL RECORD</span><span>{mode === 'create' ? 'NEW CASE' : 'ADMISSION'}</span></div>
+            <h2>{mode === 'create' ? 'Create your room.' : 'Join the investigation.'}</h2><p className="muted form-description">{mode === 'create' ? 'You’ll be the host. Choose a name your friends will recognise.' : 'Your host has the six-character room code.'}</p>
+            <label htmlFor="nickname">Your nickname</label><input id="nickname" autoComplete="nickname" autoFocus maxLength={24} required placeholder="Your name. Or your best alias." value={name} onChange={event => setName(event.target.value)} aria-invalid={!!formError} aria-describedby={formError ? 'entry-error' : undefined} />
+            {mode === 'join' && <><label htmlFor="room-code">Room code</label><input className="code-input" id="room-code" autoComplete="off" autoCapitalize="characters" spellCheck={false} enterKeyHint="go" minLength={6} maxLength={6} pattern="[A-Za-z2-9]{6}" required placeholder="ABC234" value={code} onChange={event => setCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ''))} aria-invalid={!!formError} aria-describedby={formError ? 'entry-error' : undefined} /></>}
+            {formError && <p className="error" id="entry-error" role="alert">{formError}</p>}
+            <button className="primary full" disabled={loading}>{loading ? <><span className="button-spinner" aria-hidden="true" />Gathering suspects…</> : <>{mode === 'create' ? 'Create Room' : 'Join Room'}<Arrow /></>}</button>
+            <p className="form-footnote">Every player needs their own screen.<br />Best played in the same room.</p>
           </form>
-          <p className="small muted">Play together in person. Each player needs their own screen.</p>
         </section>}
       </> : <section className="room">
-        <div className="room-bar"><div><span className="eyebrow">YOUR ROOM</span><div className="room-code">{session.code}<button className="copy-button" aria-label="Copy room code" onClick={copyCode}>{copied ? 'Copied ✓' : 'Copy code ⧉'}</button></div></div><div className={`connection ${connected ? 'online' : ''}`} role="status"><span className="live-dot" />{connection}</div></div>
-        {canInvite && <button className="secondary invite-button" onClick={() => setShowInvite(true)}>Show QR Code <span aria-hidden="true">▦</span></button>}
+        <div className="room-bar"><div className="case-reference"><span className="eyebrow">INVESTIGATION / ROOM CODE</span><div className="room-code"><span>{session.code}</span><button className="copy-button" aria-label="Copy room code" onClick={copyCode}>{copied ? 'Copied ✓' : 'Copy code'}<span aria-hidden="true">⧉</span></button></div></div>
+          <div className="room-actions">{canInvite && <button className="secondary invite-button" onClick={() => setShowInvite(true)}><span aria-hidden="true">▦</span> Show QR Code</button>}
+            <div className={`connection ${connected ? 'online' : ''}`} role="status"><span className="status-dot" />{connection}</div></div>
+        </div>
         {error && <div className="error" role="alert">{error}</div>}
         <RoomNotice notice={room?.notice} serverNow={serverNow} />
         {room?.hostReconnectAt && <div className="notice" role="status">The host disconnected. Holding their place for {formatTime(room.hostReconnectAt, serverNow)}.</div>}
-        {!room ? <div className="card loading-state"><div className="spinner" /><h2>Finding your people…</h2><p className="muted">Your room and answers are saved on the server.</p></div> : <>
-          <div className="room-layout"><div className="game-column">
-            {room.phase === 'lobby' && <div className="card stage-card">
-              <div className="eyebrow">THE LOBBY</div><h1>One of you<br /><span>won’t fit in.</span></h1>
-              <p className="muted">Share the code. Gather your friends. Keep your screen to yourself once the round starts.</p>
-              <div className="lobby-count"><strong>{onlineCount.toString().padStart(2, '0')}</strong><span>/ 12 players connected<br />At least 3 to start</span></div>
-              {isHost ? <button className="primary full" disabled={busy || onlineCount < 3} onClick={() => send({ type: 'start' })}>Start round <span aria-hidden="true">→</span></button> : <p className="waiting-label">Waiting for {room.players.find(p => p.id === room.hostId)?.nickname ?? 'the host'} to start…</p>}
-              <p className="small muted">90 seconds to answer · 20 minutes for the whole round</p>
-            </div>}
-            {room.phase === 'answering' && <div className="card stage-card">
-              <div className="stage-top"><div className="eyebrow">ROUND {String(room.roundNumber).padStart(2, '0')} / KEEP IT PRIVATE</div><span className="timer" aria-label="Answer time remaining">{formatTime(room.answerDeadline, serverNow)}</span></div>
-              {room.question ? <>
-                <div className="question-tag">YOUR QUESTION <span aria-hidden="true">↘</span></div><h2 className="question">{room.question}</h2>
-                {me?.submitted ? <div className="submitted" role="status"><span className="check">✓</span><h3>Answer locked in.</h3><p className="your-answer">{room.yourAnswer}</p><p className="muted">Watch the room, not their screens. Answers reveal together.</p></div> : <form onSubmit={e => { e.preventDefault(); send({ type: 'answer', answer, round: room.roundNumber }); }}>
-                  <label htmlFor="answer">Your answer</label><input id="answer" autoComplete="off" maxLength={160} required placeholder="Keep it short. Make it believable." value={answer} onChange={e => setAnswer(e.target.value)} disabled={busy || serverNow >= room.answerDeadline!} />
-                  <div className="input-note"><span>One answer. No edits after submitting.</span><span>{answer.length}/160</span></div>
-                  <button className="primary full" disabled={busy || !answer.trim() || serverNow >= room.answerDeadline!}>Lock in answer <span aria-hidden="true">→</span></button>
-                </form>}
-              </> : <><h2>You’re watching this round.</h2><p className="muted">You weren’t connected when it began. You can play the next one.</p></>}
-              <p className="small muted">{room.players.filter(p => room.participantIds.includes(p.id) && p.submitted).length} / {room.participantIds.length} answers submitted{serverNow >= room.answerDeadline! ? ' · Waiting for the server to reveal…' : ''}</p>
-            </div>}
-            {room.phase === 'discussion' && <div className="card stage-card">
-              <div className="stage-top"><div className="eyebrow">ROUND {String(room.roundNumber).padStart(2, '0')} / THE DISCUSSION</div><span className="timer" aria-label="Round time remaining">{formatTime(room.roundDeadline, serverNow)}</span></div>
-              <h1>Something<br /><span>doesn’t add up.</span></h1><p className="muted">These are the answers. Who got a different question? Talk it out together.</p>
-              <AnswerList room={room} />
-              <p className="small muted">The imposter reveals automatically when the round ends.</p>
-            </div>}
-            {room.phase === 'revealed' && <div className="card stage-card reveal-card">
-              <div className="eyebrow">ROUND {String(room.roundNumber).padStart(2, '0')} / THE TRUTH IS OUT</div>
-              <p className="reveal-attribution" role="status">{room.reveal?.reason === 'host' ? `${room.reveal.revealedBy} (host) revealed the imposter.` : 'Time’s up. The server revealed the imposter.'}</p>
-              <div className="imposter-badge">THE IMPOSTER WAS</div><h1 className="imposter-name">{room.reveal?.imposterName}</h1>
-              <div className="revealed-question"><span>EVERYONE ELSE’S QUESTION</span><h3>{room.reveal?.normalQuestion}</h3></div>
-              <div className="revealed-question alternate"><span>THE IMPOSTER’S QUESTION</span><h3>{room.reveal?.imposterQuestion}</h3></div>
-              <AnswerList room={room} />
-              {isHost ? <button className="primary full" disabled={busy || onlineCount < 3} onClick={() => send({ type: 'start' })}>Next round <span aria-hidden="true">→</span></button> : <p className="waiting-label">Waiting for the host to start the next round…</p>}
-              {onlineCount < 3 && <p className="small muted">At least 3 connected players needed for the next round.</p>}
-            </div>}
-            {isHost && ['answering', 'discussion'].includes(room.phase) && <div className="host-controls"><p>You’re the host. Ready to call it?</p><button className="danger-outline" disabled={busy} onClick={() => setConfirmReveal(true)}>Reveal Imposter</button><p className="small muted">Ends the round and reveals the truth to everyone.</p></div>}
-          </div>
-          <aside className="card players-card"><div className="section-label"><h2>The room</h2><span>{activePlayers.length}/12</span></div>
-            <ul>{activePlayers.map((player, index) => {
-              const removeAt = player.disconnectedAt == null ? null : player.disconnectedAt + OFFLINE_REMOVAL_MS;
-              return <li key={player.id}>
-                <span className={`avatar avatar-${index % 4}`}>{player.nickname.slice(0, 1).toUpperCase()}</span>
-                <div className="player-info"><strong>{player.nickname}{player.id === room.you && <small> (you)</small>}</strong>
-                  <span className="small muted">{player.id === room.hostId ? 'Host' : 'Player'}{!player.connected ? ' · offline' : me && room.phase === 'answering' && room.participantIds.includes(player.id) ? player.submitted ? ' · answered' : ' · thinking' : ' · connected'}</span>
-                  {isHost && !player.connected && removeAt !== null && <>
-                    <button className="remove-player" aria-label={`Remove offline player ${player.nickname}`}
-                      disabled={busy || serverNow < removeAt} onClick={() => setRemovePlayer(player)}>
-                      {serverNow < removeAt ? `Removable in ${formatTime(removeAt, serverNow)}` : 'Remove offline player'}
-                    </button>
-                  </>}
-                </div>
-                <span className={`player-dot ${player.connected ? 'active' : ''}`} aria-label={player.connected ? 'Connected' : 'Disconnected'} />
-              </li>;
-            })}</ul>
-            <p className="small muted">{isHost ? 'You’re in charge. The reveal is always public. Offline players can be removed after 90 seconds.' : 'Stay curious. Trust nobody.'}</p>
-          </aside>
-          </div>
+        <p className="sr-only" role="status" aria-atomic="true">{room ? { lobby: 'Lobby. Gathering suspects.', answering: 'Private questions received. Submit your answer.', discussion: 'Evidence unlocked. All answers are public.', revealed: 'Case closed. The server has revealed the result.' }[room.phase] : 'Connecting to your room.'}</p>
+        {!room ? <div className="paper loading-state"><div className="spinner" aria-hidden="true" /><span className="eyebrow">ESTABLISHING CONTACT</span><h1>Gathering suspects…</h1><p className="muted">Your room and answers are saved on the server.</p></div> : <>
+          {room.phase !== 'lobby' && <ol className="case-steps" aria-label="Round progress">{(['answering', 'discussion', 'revealed'] as const).map((phase, index) => <li key={phase} aria-current={room.phase === phase ? 'step' : undefined}><span>{String(index + 1).padStart(2, '0')}</span>{['Statements', 'Discussion', 'Verdict'][index]}</li>)}</ol>}
+          <div className="room-layout"><div className="round-view screen-enter" key={`${room.roundNumber}:${room.phase}`}>
+            <RoundScreens room={room} serverNow={serverNow} busy={busy} isHost={isHost} onlineCount={onlineCount} answer={answer} setAnswer={setAnswer} send={send} onReveal={() => setConfirmReveal(true)} />
+          </div><PlayerRoster room={room} serverNow={serverNow} isHost={isHost} busy={busy} onRemove={player => { setRemovePlayer(player); setRemoveOpen(true); }} /></div>
         </>}
-        {!connected && <button className="text-button return-home" onClick={exit}>Return home on this tab</button>}
+        {!connected && <button className="text-button return-home" onClick={exit}>Return home on this tab <Arrow /></button>}
       </section>}
     </main>
-    <footer><span>IMP0STER</span><span>A LITTLE DOUBT. A LOT OF FUN.</span></footer>
-    {confirmReveal && room && <Confirm title="Ready to reveal?" message="Everyone will immediately see the imposter’s name and both questions. This ends the round for everyone." confirm="Reveal to everyone" onCancel={() => setConfirmReveal(false)} onConfirm={() => { send({ type: 'reveal', round: room.roundNumber }); setConfirmReveal(false); }} disabled={busy} />}
-    {confirmLeave && <Confirm title="Leave this room?" message={isHost ? 'Host privileges will immediately pass to the earliest-joined remaining player. Leaving removes your reconnection session.' : 'You will leave this room and remove your reconnection session.'} confirm="Leave room" onCancel={() => setConfirmLeave(false)} onConfirm={() => void leave()} disabled={loading} />}
-    {showInvite && canInvite && session && <InviteModal code={session.code} onClose={() => setShowInvite(false)} />}
-    {removePlayer && isHost && <Confirm title={`Remove ${removePlayer.nickname}?`}
-      message={removalStillValid
-        ? 'This player has been offline for at least 90 seconds. Removing them frees their nickname and slot and prevents this session from reconnecting. Their current round answers and history are preserved.'
-        : 'This player’s connection changed or they have already left. They cannot be removed with this confirmation. Cancel and check the room.'}
-      confirm="Remove offline player" disabled={busy || !removalStillValid} onCancel={() => setRemovePlayer(null)}
-      onConfirm={() => { if (removalStillValid) send({ type: 'removeOffline', playerId: removePlayer.id, disconnectedAt: removePlayer.disconnectedAt! }); setRemovePlayer(null); }} />}
+    <footer><span className="footer-wordmark">IMP0STER<span aria-hidden="true"> / </span><span>CASE FILE</span></span><span>KEEP YOUR FRIENDS CLOSE. YOUR QUESTION CLOSER.</span></footer>
+    <Confirm open={confirmReveal && !!room && isHost} title="Time to close the case?" message="Everyone will immediately see the imposter’s name and both questions. This ends the round for everyone." confirm="Reveal to everyone" onCancel={() => setConfirmReveal(false)} onConfirm={() => { if (room) send({ type: 'reveal', round: room.roundNumber }); setConfirmReveal(false); }} disabled={busy} />
+    <Confirm open={confirmLeave} title="Leave this room?" message={isHost ? 'Host privileges will immediately pass to the earliest-joined remaining player. Leaving removes your reconnection session.' : 'You will leave this room and remove your reconnection session.'} confirm="Leave room" onCancel={() => setConfirmLeave(false)} onConfirm={() => void leave()} disabled={loading} />
+    {canInvite && session && <InviteModal open={showInvite} code={session.code} onClose={() => setShowInvite(false)} />}
+    {removePlayer && <Confirm open={removeOpen && isHost} title={`Remove ${removePlayer.nickname}?`}
+      message={removalStillValid ? 'This player has been offline for at least 90 seconds. Removing them frees their nickname and slot and prevents this session from reconnecting. Their current round answers and history are preserved.' : 'This player’s connection changed or they have already left. They cannot be removed with this confirmation. Cancel and check the room.'}
+      confirm="Remove offline player" disabled={busy || !removalStillValid} onCancel={() => setRemoveOpen(false)}
+      onConfirm={() => { if (removalStillValid) send({ type: 'removeOffline', playerId: removePlayer.id, disconnectedAt: removePlayer.disconnectedAt! }); setRemoveOpen(false); }} />}
   </div>;
-}
-function AnswerList({ room }: { room: RoomView }) {
-  return <ul className="answer-list">{room.answers?.map(answer => <li key={answer.playerId} className={room.reveal?.imposterId === answer.playerId ? 'imposter-answer' : ''}><div><span>{answer.nickname}{answer.playerId === room.you ? ' (you)' : ''}</span>{room.reveal?.imposterId === answer.playerId && <b>IMPOSTER</b>}</div><strong>{answer.answer ?? 'No answer'}</strong></li>)}</ul>;
 }
