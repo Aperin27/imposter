@@ -1,13 +1,22 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { Action, ServerMessage } from '../shared/protocol';
-import { act, advance, connect, createGame, disconnect, GameError, join, member, nextDeadline, randomIndex, view, type Game } from './game';
+import { act, advance, connect, createGame, disconnect, GameError, join, member, nextDeadline, randomIndex, upgradeGame, view, type Game } from './game';
+import { enforcePublicLimit, publicClientKey, PublicRequestError } from './rateLimit';
 
-export interface Env { ROOMS: DurableObjectNamespace<Room>; ASSETS: Fetcher }
+export interface Env {
+  ROOMS: DurableObjectNamespace<Room>; ASSETS: Fetcher;
+  CREATE_ROOM_LIMITER: RateLimit; JOIN_ROOM_LIMITER: RateLimit;
+}
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const json = (data: unknown, status = 200) => Response.json(data, {
   status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
 });
 function errorResponse(error: unknown): Response {
+  if (error instanceof PublicRequestError) {
+    const response = json({ error: error.message }, error.status);
+    response.headers.set('Retry-After', '60');
+    return response;
+  }
   if (error instanceof GameError) return json({ error: error.message }, 400);
   console.error('Room operation failed', error instanceof Error ? error.message : 'Unknown error');
   return json({ error: 'Something went wrong. Please reconnect and try again.' }, 500);
@@ -43,6 +52,7 @@ export default {
     if (origin && origin !== url.origin) return json({ error: 'Cross-origin requests are not allowed.' }, 403);
     try {
       if (url.pathname === '/api/rooms' && request.method === 'POST') {
+        await enforcePublicLimit(env.CREATE_ROOM_LIMITER, publicClientKey(request), 'create');
         const body = await readBody(request);
         for (let attempt = 0; attempt < 5; attempt++) {
           const code = Array.from({ length: 6 }, () => CODE_ALPHABET[randomIndex(CODE_ALPHABET.length)]).join('');
@@ -50,6 +60,7 @@ export default {
           const result = await stub.fetch('https://room/create', { method: 'POST',
             headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, code }) });
           if (result.status !== 409) return result;
+          await result.arrayBuffer();
         }
         return json({ error: 'Could not create a room. Try again.' }, 503);
       }
@@ -62,7 +73,9 @@ export default {
       if (endpoint === 'socket' && origin !== url.origin) return json({ error: 'A same-origin WebSocket is required.' }, 403);
       const stub = env.ROOMS.get(env.ROOMS.idFromName(code));
       url.pathname = `/${endpoint}`;
-      return await stub.fetch(new Request(url, request));
+      const forwarded = new Request(url, request);
+      forwarded.headers.set('X-Imposter-Client-Key', publicClientKey(request));
+      return await stub.fetch(forwarded);
     } catch (error) { return errorResponse(error); }
   },
 } satisfies ExportedHandler<Env>;
@@ -79,7 +92,9 @@ export class Room extends DurableObject<Env> {
       // Hibernation keeps sockets and attachments; a restart can lose sockets.
       const liveIds = new Set(ctx.getWebSockets().filter(ws => this.attachment(ws)?.active)
         .map(ws => this.attachment(ws)!.playerId));
-      let changed = false;
+      const beforeUpgrade = JSON.stringify(this.game);
+      upgradeGame(this.game, Date.now());
+      let changed = beforeUpgrade !== JSON.stringify(this.game);
       for (const player of this.game.players) {
         if (player.connected && !liveIds.has(player.id)) {
           disconnect(this.game, player.id, Date.now()); changed = true;
@@ -140,7 +155,11 @@ export class Room extends DurableObject<Env> {
           await this.persist();
           return json({ code: game.code }, 201);
         }
-        if (!this.game) return json({ error: 'Room not found or expired. Check the code or create a new room.' }, 404);
+        if (!this.game) {
+          if (path === '/join') await enforcePublicLimit(this.env.JOIN_ROOM_LIMITER,
+            request.headers.get('X-Imposter-Client-Key') ?? 'imposter:local-or-unknown', 'join');
+          return json({ error: 'Room not found or expired. Check the code or create a new room.' }, 404);
+        }
         if (path === '/resume' || path === '/leave') {
           const body = await readBody(request);
           const player = member(this.game, String(body.token));
@@ -158,6 +177,9 @@ export class Room extends DurableObject<Env> {
         }
         if (path === '/join') {
           const body = await readBody(request);
+          if (!this.game.players.some(p => !p.left && p.token === body.token)) {
+            await enforcePublicLimit(this.env.JOIN_ROOM_LIMITER, request.headers.get('X-Imposter-Client-Key') ?? 'imposter:local-or-unknown', 'join');
+          }
           join(this.game, body.nickname, body.token, Date.now());
           await this.persist(); this.broadcast();
           return json({ code: this.game.code });
@@ -180,7 +202,7 @@ export class Room extends DurableObject<Env> {
         }
         this.ctx.acceptWebSocket(pair[1]);
         pair[1].serializeAttachment({ playerId: player.id, active: true } satisfies Attachment);
-        connect(this.game, player.id);
+        connect(this.game, player.id, Date.now());
         await this.persist(); this.broadcast();
         return new Response(null, { status: 101, webSocket: pair[0], headers: { 'Sec-WebSocket-Protocol': 'imposter' } });
       } catch (error) {
@@ -199,7 +221,7 @@ export class Room extends DurableObject<Env> {
         if (typeof message !== 'string' || message.length > 1024) throw new GameError('Invalid or oversized action.');
         let action: Action;
         try { action = JSON.parse(message) as Action; } catch { throw new GameError('Invalid action.'); }
-        if (!action || !['start', 'answer', 'reveal', 'leave'].includes(action.type)) throw new GameError('Unknown action.');
+        if (!action || !['start', 'answer', 'reveal', 'leave', 'removeOffline'].includes(action.type)) throw new GameError('Unknown action.');
         act(this.game, attachment.playerId, action, Date.now());
         await this.persist(); this.broadcast();
         if (action.type === 'leave') {
@@ -213,18 +235,22 @@ export class Room extends DurableObject<Env> {
       }
     });
   }
-  async webSocketClose(ws: WebSocket, code: number, reason: string) {
+  async webSocketClose(ws: WebSocket) {
     await this.ctx.blockConcurrencyWhile(async () => {
       const attachment = this.attachment(ws);
       if (!attachment?.active || !this.game) return;
       ws.serializeAttachment({ ...attachment, active: false });
-      ws.close(code, reason);
+      // The configured runtime auto-replies to close frames. Received sentinel codes
+      // such as 1005/1006 must never be sent back as WebSocket close codes.
       if (await this.expireIfDue() || !this.game) return;
       disconnect(this.game, attachment.playerId, Date.now());
       await this.persist(); this.broadcast();
     });
   }
-  async webSocketError(ws: WebSocket) { await this.webSocketClose(ws, 1011, 'Connection interrupted'); }
+  async webSocketError(ws: WebSocket) {
+    ws.close(1011, 'Connection interrupted');
+    await this.webSocketClose(ws);
+  }
   async alarm() {
     await this.ctx.blockConcurrencyWhile(async () => {
       if (await this.expireIfDue() || !this.game) return;

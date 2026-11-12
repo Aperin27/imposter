@@ -62,13 +62,13 @@ describe('round permissions, privacy and timing', () => {
     const { game, host, players } = lobby(4); start(game, host.id);
     act(game, players[1].id, { type: 'answer', answer: 'TOP SECRET ANSWER', round: 1 }, T);
     const views = players.map(p => view(game, p.id, T));
-    expect(views[0].question).toBe(QUESTIONS[0][1]);
-    expect(views.slice(1).map(v => v.question)).toEqual(Array(3).fill(QUESTIONS[0][0]));
+    expect(views[0].question).toBe(QUESTIONS[0].questions[1]);
+    expect(views.slice(1).map(v => v.question)).toEqual(Array(3).fill(QUESTIONS[0].questions[0]));
     for (const [i, snapshot] of views.entries()) {
       expect(snapshot.reveal).toBeNull(); expect(snapshot.answers).toBeNull();
       const wire = JSON.stringify(snapshot);
       expect(wire).not.toContain('imposterId'); expect(wire).not.toContain('token'); expect(wire).not.toContain('questions');
-      expect(wire).not.toContain(QUESTIONS[0][i === 0 ? 0 : 1]);
+      expect(wire).not.toContain(QUESTIONS[0].questions[i === 0 ? 0 : 1]);
       if (i !== 1) expect(wire).not.toContain('TOP SECRET ANSWER');
     }
   });
@@ -105,7 +105,7 @@ describe('round permissions, privacy and timing', () => {
     end(game, host.id, phase === 'discussion' ? T + ANSWER_MS : T);
     const snapshots = players.map(p => view(game, p.id, T));
     expect(snapshots.every(v => v.phase === 'revealed' && v.reveal?.imposterId === host.id)).toBe(true);
-    expect(snapshots[0].reveal).toMatchObject({ normalQuestion: QUESTIONS[0][0], imposterQuestion: QUESTIONS[0][1], reason: 'host', revealedBy: host.nickname });
+    expect(snapshots[0].reveal).toMatchObject({ normalQuestion: QUESTIONS[0].questions[0], imposterQuestion: QUESTIONS[0].questions[1], reason: 'host', revealedBy: host.nickname });
     expect(() => end(game, host.id)).toThrow('already');
     expect(() => act(game, host.id, { type: 'answer', answer: 'late', round: 1 }, T)).toThrow('ended');
   });
@@ -122,7 +122,7 @@ describe('round permissions, privacy and timing', () => {
       start(game, host.id); seen.add(game.round!.questions[0]); end(game, host.id);
     }
     expect(seen.size).toBeGreaterThanOrEqual(15); expect(seen.size).toBe(QUESTIONS.length);
-    start(game, host.id); expect(game.usedQuestions).toHaveLength(1);
+    start(game, host.id); expect(game.usedQuestionIds).toHaveLength(1);
   });
   it('keeps departed participants in the round snapshot but revokes their permissions', () => {
     const { game, host, players } = lobby(); start(game, host.id);

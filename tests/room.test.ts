@@ -37,7 +37,7 @@ class Client {
   send(action: Action | unknown) { this.ws.send(JSON.stringify(action)); }
   async message(predicate: (message: ServerMessage) => boolean): Promise<ServerMessage> {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.notify = null; reject(new Error('Timed out waiting for server message')); }, 4000);
+      const timer = setTimeout(() => { this.notify = null; reject(new Error(`Timed out: ${predicate}; messages: ${JSON.stringify(this.messages.filter(m => m.type !== 'state'))}; phase: ${this.latest?.phase}`)); }, 4000);
       const check = () => {
         const index = this.messages.findIndex(predicate);
         if (index !== -1) {
@@ -49,6 +49,7 @@ class Client {
   }
   async state(predicate: (state: RoomView) => boolean = () => true): Promise<RoomView> {
     if (this.latest && predicate(this.latest)) return this.latest;
+    this.messages = this.messages.filter(message => message.type !== 'state');
     const message = await this.message(m => m.type === 'state' && predicate(m.state));
     if (message.type !== 'state') throw new Error('Expected state');
     return message.state;
@@ -178,5 +179,65 @@ describe('Worker and SQLite Durable Object integration', () => {
     const result = await worker.fetch(new Request(`${origin}/api/rooms/${code}/socket`, { headers: { Upgrade: 'websocket', Origin: origin, 'Sec-WebSocket-Protocol': `imposter, ${secret()}` } }), bindings);
     expect(result.status).toBe(400);
     expect((await request('/api/rooms/XXXXXX/join', { nickname: 'Unknown', token: secret() })).status).toBe(404);
+  });
+  it('removes offline members publicly without losing saved answers or deadlines across hibernation', async () => {
+    const { code, tokens, host, second, third, stub } = await group();
+    host.send({ type: 'start' }); const started = await host.state(s => s.phase === 'answering');
+    second.send({ type: 'answer', round: 1, answer: 'Retain this answer' });
+    const answered = await second.state(s => s.yourAnswer === 'Retain this answer');
+    second.ws.close();
+    const offline = await host.state(s => s.players.some(p => p.id === answered.you && !p.connected));
+    const disconnectedAt = offline.players.find(p => p.id === answered.you)!.disconnectedAt!;
+    third.send({ type: 'removeOffline', playerId: answered.you, disconnectedAt }); await third.error('Only the host');
+    host.send({ type: 'removeOffline', playerId: answered.you, disconnectedAt }); await host.error('90 seconds');
+    vi.spyOn(Date, 'now').mockReturnValue(disconnectedAt + 90_000);
+    host.send({ type: 'removeOffline', playerId: answered.you, disconnectedAt });
+    const removed = await third.state(s => !!s.notice?.text.includes('removed offline player Second'));
+    expect(removed.players.find(p => p.id === answered.you)?.left).toBe(true);
+    expect(removed.roundDeadline).toBe(started.roundDeadline);
+    expect(removed.answers?.find(a => a.playerId === answered.you)?.answer).toBe('Retain this answer');
+    await evictDurableObject(stub);
+    expect((await request(`/api/rooms/${code}/resume`, { token: tokens[1] })).status).toBe(400);
+    expect((await request(`/api/rooms/${code}/join`, { token: tokens[1], nickname: 'Changed' })).status).toBe(400);
+    host.send({ type: 'reveal', round: 1 }); const final = await third.state(s => s.phase === 'revealed');
+    expect(final.answers?.find(a => a.playerId === answered.you)?.answer).toBe('Retain this answer');
+    expect((await request(`/api/rooms/${code}/join`, { token: secret(), nickname: 'Second' })).status).toBe(200);
+  });
+  it('reconnect-first defeats an old removal confirmation under the real room lock', async () => {
+    const { code, tokens, host, second } = await group(); const secondState = await second.state();
+    second.ws.close();
+    const offline = await host.state(s => s.players.some(p => p.id === secondState.you && !p.connected));
+    const disconnectedAt = offline.players.find(p => p.id === secondState.you)!.disconnectedAt!;
+    vi.spyOn(Date, 'now').mockReturnValue(disconnectedAt + 90_000);
+    const returned = await socket(code, tokens[1]); await returned.state();
+    host.send({ type: 'removeOffline', playerId: secondState.you, disconnectedAt }); await host.error('Connected players');
+    expect((await request(`/api/rooms/${code}/resume`, { token: tokens[1] })).status).toBe(200);
+  });
+  it('migrates a stored Stage 1 room on wake without replacing round history or deadlines', async () => {
+    const { code, tokens, host, second, third, stub } = await group();
+    host.send({ type: 'start' }); const started = await host.state(s => s.phase === 'answering');
+    third.send({ type: 'answer', round: 1, answer: 'Legacy answer' }); await third.state(s => s.yourAnswer === 'Legacy answer');
+    second.ws.close(); await host.state(s => s.players.some(p => p.nickname === 'Second' && !p.connected));
+    const original = await runInDurableObject(stub, async (_instance, ctx) => {
+      const old = (await ctx.storage.get<Game>('game'))!;
+      delete old.usedQuestionIds; delete old.revokedTokens; delete old.notice; delete old.round!.questionId;
+      old.players.forEach(p => delete p.disconnectedAt);
+      old.usedQuestions = [0, 3, 17]; old.hostNotice = 'Outdated notice';
+      await ctx.storage.put('game', old); return old;
+    });
+    await evictDurableObject(stub);
+    const upgradedAt = started.serverNow + 10_000; vi.spyOn(Date, 'now').mockReturnValue(upgradedAt);
+    expect((await request(`/api/rooms/${code}/resume`, { token: tokens[0] })).status).toBe(200);
+    const saved = (await runInDurableObject(stub, (_instance, ctx) => ctx.storage.get<Game>('game')))!;
+    expect(saved.round).toEqual(original.round); expect(saved.hostId).toBe(original.hostId);
+    expect(saved.hostReconnectAt).toBe(original.hostReconnectAt);
+    expect(saved.usedQuestionIds).toEqual(['film-patience', 'pizza-party', 'age-and-frying-pans']);
+    expect(saved.players.find(p => p.nickname === 'Second')?.disconnectedAt).toBe(upgradedAt);
+    expect(saved.players.find(p => p.nickname === 'Host')?.connected).toBe(true);
+    expect(saved.hostNotice).toBeNull();
+    expect(await runInDurableObject(stub, (_instance, ctx) => ctx.storage.getAlarm())).toBe(started.answerDeadline);
+    host.send({ type: 'answer', round: 1, answer: 'Still playing' });
+    const state = await third.state(s => s.players.some(p => p.id === s.hostId && p.submitted));
+    expect(state.answers).toBeNull(); expect(state.reveal).toBeNull(); expect(state.yourAnswer).toBe('Legacy answer');
   });
 });
