@@ -1391,6 +1391,19 @@ independent of live game data. */
   margin-bottom: 28px;
 }
 
+.common-question-document {
+  margin-bottom: var(--space-6);
+  border-top: 3px solid var(--gold);
+}
+
+.common-question-document>.eyebrow {
+  margin: var(--space-5) 0 var(--space-3);
+}
+
+.common-question-document .question {
+  margin-bottom: 0;
+}
+
 .answer-list {
   list-style: none;
   padding: 0;

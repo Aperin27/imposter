@@ -188,27 +188,43 @@ describe('Worker and SQLite Durable Object integration', () => {
     expect(await savedGame(current.stub)).toBeUndefined(); expect(await allocationCount()).toBe(1);
   });
   it('runs a complete private round over real sockets and starts another', async () => {
-    const { code, host, second, third } = await group();
+    const { code, host, second, third, tokens, stub } = await group();
     second.send({ type: 'start' }); await second.error('Only the host');
     host.send({ type: 'start' });
     const clients = [host, second, third];
     const privateStates = await Promise.all(clients.map(c => c.state(s => s.phase === 'answering')));
     expect(new Set(privateStates.map(s => s.question)).size).toBe(2);
-    expect(privateStates.every(s => s.reveal === null && s.answers === null)).toBe(true);
+    expect(privateStates.every(s => s.reveal === null && s.answers === null && s.commonQuestion === null)).toBe(true);
     for (const [index, client] of clients.entries()) {
       client.send({ type: 'answer', answer: `Answer ${index}`, round: 1 });
       await client.state(s => s.yourAnswer === `Answer ${index}`);
     }
     const discussion = await Promise.all(clients.map(c => c.state(s => s.phase === 'discussion')));
     expect(discussion.every(s => s.answers?.length === 3 && s.reveal === null)).toBe(true);
-    second.send({ type: 'reveal', round: 1 }); await second.error('Only the host');
-    host.send({ type: 'reveal', round: 1 });
+    const saved = (await savedGame(stub))!;
+    const [common, alternate] = saved.round!.questions;
+    for (const snapshot of discussion) {
+      expect(snapshot.commonQuestion).toBe(common);
+      expect(snapshot.question).toBeNull();
+      expect(JSON.stringify(snapshot)).not.toContain(alternate);
+      expect(JSON.stringify(snapshot)).not.toContain('imposterId');
+    }
+    await evictDurableObject(stub);
+    const imposterIndex = discussion.findIndex(s => s.you === saved.round!.imposterId);
+    const resumed = await socket(code, tokens[imposterIndex]);
+    const recovered = await resumed.state(s => s.phase === 'discussion');
+    expect(recovered.commonQuestion).toBe(common); expect(recovered.reveal).toBeNull();
+    clients[imposterIndex] = resumed;
+    const activeHost = clients[0], activeSecond = clients[1];
+    activeSecond.send({ type: 'reveal', round: 1 }); await activeSecond.error('Only the host');
+    activeHost.send({ type: 'reveal', round: 1 });
     const revealed = await Promise.all(clients.map(c => c.state(s => s.phase === 'revealed')));
     expect(revealed[0].reveal?.reason).toBe('host');
+    expect(revealed.every(s => s.reveal?.normalQuestion === common && s.reveal?.imposterQuestion === alternate)).toBe(true);
     expect(revealed.every(s => s.reveal?.imposterId === revealed[0].reveal?.imposterId)).toBe(true);
-    host.send({ type: 'reveal', round: 1 }); await host.error('already');
-    host.send({ type: 'start' });
-    expect((await host.state(s => s.roundNumber === 2)).phase).toBe('answering');
+    activeHost.send({ type: 'reveal', round: 1 }); await activeHost.error('already');
+    activeHost.send({ type: 'start' });
+    expect((await activeHost.state(s => s.roundNumber === 2)).phase).toBe('answering');
     expect((await request(`/api/rooms/${code}/join`, { nickname: 'Late', token: secret() })).status).toBe(400);
   });
   it('preserves answers, deadlines and socket membership across hibernation and replacement', async () => {
@@ -254,16 +270,29 @@ describe('Worker and SQLite Durable Object integration', () => {
     expect(await allocationCount()).toBe(1);
   });
   it('alarms advance answer and round deadlines without any client action', async () => {
-    const { host, second, stub } = await group();
+    const { code, tokens, host, second, third, stub } = await group();
     host.send({ type: 'start' }); const initial = await host.state(s => s.phase === 'answering');
     const time = vi.spyOn(Date, 'now').mockReturnValue(initial.answerDeadline!);
     expect(await runDurableObjectAlarm(stub)).toBe(true);
     const discussion = await second.state(s => s.phase === 'discussion');
     expect(discussion.answers?.every(a => a.answer === null)).toBe(true);
+    const savedRound = (await savedGame(stub))!.round!;
+    const snapshots = await Promise.all([host, second, third].map(c => c.state(s => s.phase === 'discussion')));
+    for (const snapshot of snapshots) {
+      expect(snapshot.commonQuestion).toBe(savedRound.questions[0]);
+      expect(snapshot.reveal).toBeNull(); expect(snapshot.question).toBeNull();
+      expect(JSON.stringify(snapshot)).not.toContain(savedRound.questions[1]);
+      expect(JSON.stringify(snapshot)).not.toContain('imposterId');
+    }
     expect(await runInDurableObject(stub, (_instance, ctx) => ctx.storage.getAlarm())).toBe(initial.roundDeadline);
+    await evictDurableObject(stub, { webSockets: 'close' });
+    const resumed = await socket(code, tokens[1]);
+    expect((await resumed.state(s => s.phase === 'discussion')).commonQuestion).toBe(discussion.commonQuestion);
     time.mockReturnValue(initial.roundDeadline!);
     expect(await runDurableObjectAlarm(stub)).toBe(true);
-    expect((await second.state(s => s.phase === 'revealed')).reveal?.reason).toBe('timeout');
+    const final = await resumed.state(s => s.phase === 'revealed');
+    expect(final.reveal?.reason).toBe('timeout');
+    expect(final.reveal?.normalQuestion).toBe(discussion.commonQuestion);
     const saved = await runInDurableObject(stub, (_instance, ctx) => ctx.storage.get<Game>('game'));
     expect(saved?.round?.phase).toBe('revealed');
   });

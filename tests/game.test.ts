@@ -58,6 +58,33 @@ describe('rooms and membership', () => {
 });
 
 describe('round permissions, privacy and timing', () => {
+  it.each([0, 1])('publishes only the oriented common question during discussion (orientation %i)', orientation => {
+    const { game, host, players } = lobby();
+    expect(view(game, host.id, T).commonQuestion).toBeNull();
+    start(game, host.id, T, () => orientation);
+    const common = QUESTIONS[0].questions[orientation];
+    const alternate = QUESTIONS[0].questions[1 - orientation];
+    expect(game.round!.questions[0]).toBe(common);
+    for (const [index, player] of players.entries()) {
+      expect(view(game, player.id, T).commonQuestion).toBeNull();
+      act(game, player.id, { type: 'answer', answer: String(index), round: 1 }, T + index);
+    }
+    for (const player of players) {
+      const snapshot = view(game, player.id, T + 3);
+      expect(snapshot.phase).toBe('discussion');
+      expect(snapshot.commonQuestion).toBe(common);
+      expect(snapshot.question).toBeNull(); expect(snapshot.reveal).toBeNull();
+      const wire = JSON.stringify(snapshot);
+      expect(wire).not.toContain(alternate); expect(wire).not.toContain('imposterId');
+      expect(wire).not.toContain('imposterName');
+    }
+    end(game, host.id, T + 4);
+    const final = view(game, host.id, T + 4);
+    expect(final.commonQuestion).toBeNull();
+    expect(final.reveal?.normalQuestion).toBe(common);
+    expect(final.reveal?.imposterQuestion).toBe(alternate);
+    expect(final.reveal?.imposterId).toBe(game.round!.imposterId);
+  });
   it('does not start a valid lobby without a server question allocation', () => {
     const { game, host } = lobby();
     expect(() => act(game, host.id, { type: 'start' }, T)).toThrow('server question allocation');

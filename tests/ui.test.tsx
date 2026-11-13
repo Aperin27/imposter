@@ -20,7 +20,7 @@ function room(): RoomView {
     players: [{ id: 'host', nickname: 'Alex', connected: true, left: false, submitted: false },
       { id: 'other', nickname: 'Blair', connected: false, left: false, submitted: false, disconnectedAt: T - 90_000 }],
     phase: 'lobby', roundNumber: 0, serverNow: T, answerDeadline: null, roundDeadline: null,
-    participantIds: [], question: null, yourAnswer: null, answers: null, reveal: null };
+    participantIds: [], question: null, commonQuestion: null, yourAnswer: null, answers: null, reveal: null };
 }
 const send = vi.fn();
 function withRoom(state: RoomView | null = null) {
@@ -181,6 +181,17 @@ describe('CASE FILE gameplay presentation', () => {
   }
   const reveal = { imposterId: 'other', imposterName: 'Blair', normalQuestion, imposterQuestion: otherQuestion,
     reason: 'host' as const, revealedBy: 'Alex' };
+  it.each(['host', 'other', 'third'])('shows the public question after a fresh discussion mount for %s', you => {
+    savePlayer();
+    withRoom({ ...playing(), you, phase: 'discussion', question: null, commonQuestion: normalQuestion,
+      answers: [{ playerId: 'other', nickname: 'Blair', answer: 'Eight' }] });
+    const { container } = render(<App />);
+    expect(screen.getByRole('heading', { name: normalQuestion })).toBeTruthy();
+    expect(screen.getByText('COMMON QUESTION')).toBeTruthy();
+    expect(screen.queryByText(otherQuestion)).toBeNull();
+    expect(screen.queryByText('THE IMPOSTER WAS…')).toBeNull();
+    expect(container.querySelector('.imposter-answer')).toBeNull();
+  });
   it('runs home → create → lobby → private answer → discussion → server reveal → next round', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(T);
     const { rerender } = render(<App />);
@@ -199,10 +210,13 @@ describe('CASE FILE gameplay presentation', () => {
     withRoom({ ...state, yourAnswer: 'Seven', players: state.players.map(p => ({ ...p, submitted: p.id === 'host' })) }); rerender(<App />);
     expect(screen.getByText(/STATEMENT.*SEALED/)).toBeTruthy(); expect(screen.queryByLabelText('Your answer')).toBeNull();
     const answers = [{ playerId: 'host', nickname: 'Alex', answer: 'Seven' }, { playerId: 'other', nickname: 'Blair', answer: 'Eight' }, { playerId: 'third', nickname: 'Casey', answer: null }];
-    const discussion = { ...state, phase: 'discussion' as const, question: null, answers };
+    const discussion = { ...state, phase: 'discussion' as const, question: null, commonQuestion: normalQuestion, answers };
     withRoom(discussion); rerender(<App />);
     expect(screen.getByText('Eight')).toBeTruthy(); expect(screen.getByText('No answer')).toBeTruthy();
-    expect(screen.queryByText(normalQuestion)).toBeNull(); expect(screen.queryByText(otherQuestion)).toBeNull();
+    const commonQuestion = screen.getByRole('heading', { name: normalQuestion });
+    expect(screen.getByText('COMMON QUESTION')).toBeTruthy();
+    expect(commonQuestion.compareDocumentPosition(screen.getByText('Eight')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText(otherQuestion)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Reveal Imposter' }));
     fireEvent.click(screen.getByRole('button', { name: 'Reveal to everyone' }));
     expect(send).toHaveBeenLastCalledWith({ type: 'reveal', round: 1 });

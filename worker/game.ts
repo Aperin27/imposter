@@ -229,6 +229,7 @@ export function view(game: Game, id: string, now: number): RoomView {
     participantIds: round?.participants.map(p => p.id) ?? [],
     question: round && participating && round.phase === 'answering'
       ? round.questions[round.imposterId === id ? 1 : 0] : null,
+    commonQuestion: round?.phase === 'discussion' ? round.questions[0] : null,
     yourAnswer: round?.answers[id] ?? null,
     answers: publicAnswers ? round.participants.map(p => ({ playerId: p.id, nickname: p.nickname, answer: round.answers[p.id] ?? null })) : null,
     reveal: round?.phase === 'revealed' ? round.reveal : null,

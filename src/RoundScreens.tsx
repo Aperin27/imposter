@@ -52,6 +52,10 @@ export function RoundScreens({ room, serverNow, busy, isHost, onlineCount, answe
     {room.phase === 'discussion' && <section className="discussion-stage" aria-labelledby="discussion-title">
       <div className="stage-heading"><div><span className="eyebrow">CASE {round} / EVIDENCE UNLOCKED</span><h1 id="discussion-title">Read between<br /><span>the alibis.</span></h1></div><Timer deadline={room.roundDeadline} now={serverNow} /></div>
       <p className="stage-intro">All statements are on the table. Who answered a different question? Talk it out.</p>
+      {room.commonQuestion && <section className="paper stage-card common-question-document" aria-labelledby="common-question-title">
+        <DocumentHeader code={room.code} label={`CASE ${round} / SHARED EVIDENCE`} />
+        <span className="eyebrow">COMMON QUESTION</span><h2 id="common-question-title" className="question">{room.commonQuestion}</h2>
+      </section>}
       <AnswerList room={room} /><p className="small muted case-end-note">The truth comes out when the host reveals, or when the 20-minute case deadline expires.</p>
     </section>}
     {room.phase === 'revealed' && room.reveal && <section className="final-stage" aria-labelledby="reveal-title">

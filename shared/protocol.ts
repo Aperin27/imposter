@@ -25,6 +25,7 @@ export interface RoomView {
   roundDeadline: number | null;
   participantIds: string[];
   question: string | null;
+  commonQuestion: string | null;
   yourAnswer: string | null;
   answers: { playerId: string; nickname: string; answer: string | null }[] | null;
   reveal: {
