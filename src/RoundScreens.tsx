@@ -29,7 +29,7 @@ export function RoundScreens({ room, serverNow, busy, isHost, onlineCount, answe
       <div className="lobby-heading"><h1 id="lobby-title">Good company.<br /><span>Bad alibis.</span></h1><span className="stamp lobby-stamp" aria-hidden="true">OPEN<br />CASE</span></div>
       <p className="document-intro">Get everyone in the room. One of you will have a different question. None of you will know who.</p>
       <div className="lobby-count"><strong>{String(onlineCount).padStart(2, '0')}</strong><div><b>suspects connected</b><span>3–12 players · One shared investigation</span></div></div>
-      {isHost ? <button className="primary full" disabled={busy || onlineCount < 3} aria-busy={busy} onClick={() => send({ type: 'start' })}>Start round <Arrow /></button>
+      {isHost ? <button className="primary full" disabled={busy || onlineCount < 3} aria-busy={busy} onClick={() => send({ type: 'start', round: room.roundNumber })}>Start round <Arrow /></button>
         : <p className="waiting-label" role="status"><span className="status-dot" />Waiting for {room.players.find(player => player.id === room.hostId)?.nickname ?? 'the host'} to start…</p>}
       <div className="document-footnote"><span>90 seconds to answer</span><span>20 minutes to close the case</span></div>
     </section>}
@@ -64,7 +64,7 @@ export function RoundScreens({ room, serverNow, busy, isHost, onlineCount, answe
         <div className="revealed-question alternate"><span className="eyebrow">THE IMPOSTER’S QUESTION</span><h2>{room.reveal.imposterQuestion}</h2></div></div>
       <div className="evidence-section-label"><h2>Statements on record</h2><span className="eyebrow">THE CASE FILE</span></div><AnswerList room={room} />
       <div className="next-case"><div><span className="eyebrow">A FRESH START. SAME SUSPECTS.</span><h2>Open a new case.</h2></div>
-        {isHost ? <button className="primary" disabled={busy || onlineCount < 3} aria-busy={busy} onClick={() => send({ type: 'start' })}>Next round <Arrow /></button> : <p className="waiting-label" role="status">Waiting for the host to start the next round…</p>}
+        {isHost ? <button className="primary" disabled={busy || onlineCount < 3} aria-busy={busy} onClick={() => send({ type: 'start', round: room.roundNumber })}>Next round <Arrow /></button> : <p className="waiting-label" role="status">Waiting for the host to start the next round…</p>}
         {onlineCount < 3 && <p className="small muted">At least 3 connected players needed for the next round.</p>}
       </div>
     </section>}

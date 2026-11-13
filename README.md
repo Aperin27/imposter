@@ -2,6 +2,12 @@
 
 A mobile-first party game for 3–12 people playing together in person. Everyone gets a private question, one person gets a related alternative, and nobody is told their role. Compare answers, discuss, then let the host reveal the truth.
 
+## Global question rotation — Stage 4
+
+The backend now contains **250 curated pairs** across eight balanced categories, including the ten approved examples. All rooms in this Worker share one persistent randomized rotation: each pair is allocated once per cycle, regardless of room expiry. Both question orientation and the imposter are chosen securely on the backend. The CASE FILE interface and existing multiplayer rules are preserved.
+
+See [rotation, maintenance and upgrade notes](docs/QUESTION_ROTATION.md), [the editorial review and strongest 20 additions](docs/QUESTION_BANK_REVIEW.md), and [the Stage 4 contract](docs/STAGE4_SPEC.md). The new coordinator uses existing Cloudflare SQLite Durable Objects, with no additional dependencies or external services.
+
 ## CASE FILE interface — Stage 3
 
 The frontend uses an investigation-dossier design: charcoal desk, warm paper, signal red, muted gold, suspect profiles, confidential assignments, sealed statements, evidence cards and a public case verdict. The illustration is original SVG; the locally served Barlow/Barlow Condensed WOFF2 files include their SIL Open Font License under `public/fonts/`. No font CDN, image service, animation library or additional package is used.
@@ -47,6 +53,7 @@ The dev server listens on the LAN. To try phones locally, connect to the same Wi
 | `npm run typecheck` | Strict TypeScript check for client, backend and tests |
 | `npm run test` | Game rules and real Workers-runtime Durable Object/WebSocket tests |
 | `npm run build` | Production Worker in `dist/imposter` and static assets in `dist/client` |
+| `node --experimental-strip-types scripts/check-question-bank.mjs` | After building, verify all 500 private question strings are absent from client assets |
 | `npm run deploy` | Build then deploy to Cloudflare; run only when you choose to publish |
 
 Local runtime data is ignored under `.wrangler/`. Tests use separate disposable runtime storage and never touch development rooms. If a restricted runner denies the default Wrangler config/log directory, set `XDG_CONFIG_HOME` to a writable local directory and `WRANGLER_LOG_PATH` to a writable log directory for that process. A blocked optional `Request.cf` lookup may print a warning; the local runtime falls back to placeholder request metadata, which this application does not use.
@@ -55,7 +62,7 @@ Local runtime data is ignored under `.wrangler/`. Tests use separate disposable 
 
 - Only connected players participate when a round starts. At least three are required, with at most 12 reserved player slots per room.
 - New players join only in the lobby or after reveal. Existing members reconnect in any phase. A member who was offline when the round began watches until the next round.
-- Questions come from **18 backend-only pairs**, chosen without repeats until the library is exhausted. One imposter is selected using cryptographic randomness for every round.
+- Questions come from **250 backend-only pairs**, allocated without repeats across all rooms in the deployed Worker until the global bank is exhausted. An independent local/test deployment has its own rotation. One imposter and the normal/imposter question orientation are selected using cryptographic randomness for every new round.
 - Answers are final once accepted. The server checks membership, phase, deadlines and round number. Client clocks display server deadlines; they cannot extend a round.
 - Host reveal is a public, irreversible transition. Non-host requests and duplicate reveals are rejected. The imposter identity and question pair are absent from all pre-reveal player payloads. During answering, only each player's own question and answer are sent to that player.
 - Intentional **Leave room** immediately transfers host privileges in original join order. If the successor is offline, they receive the normal reconnection grace.
@@ -70,7 +77,7 @@ Local runtime data is ignored under `.wrangler/`. Tests use separate disposable 
 See [the repository map](docs/REPO_MAP.md) and [implementation contract](docs/STAGE1_SPEC.md).
 Stage 2's compatibility and acceptance contract is in [STAGE2_SPEC.md](docs/STAGE2_SPEC.md).
 
-The Worker serves the React app and routes API calls to one Durable Object per code. Essential state is persisted before broadcasts. SQLite-backed Durable Object storage holds the room record; the namespace migration uses `new_sqlite_classes`. A single alarm tracks the earliest answer deadline, round deadline, host grace or expiration, rescheduling after each transition. Time is also advanced before processing actions, so delayed alarms cannot permit late answers or secret reveals.
+The Worker serves the React app and routes API calls to one Durable Object per code. Essential state is persisted before broadcasts. SQLite-backed Durable Object storage holds the room record; the namespace migration uses `new_sqlite_classes`. One additional singleton `QuestionRotation` Durable Object owns the global deck and an idempotent allocation ledger. A room saves its start intent before requesting a pair, then saves the started round before broadcasting. The two objects do not share a transaction; rare abandoned reservations remain consumed to prevent duplicates. A single room alarm tracks the earliest answer deadline, round deadline, host grace or expiration, rescheduling after each transition. Time is also advanced before processing actions, so delayed alarms cannot permit late answers or secret reveals.
 
 Sockets use the WebSocket Hibernation API. Attachments contain a player ID and connection validity; state is reconstructed from durable storage and live attachments after hibernation. Ping/pong uses the runtime's automatic response without waking the game logic. Replacing a connection invalidates the old socket before accepting further actions from it.
 
@@ -80,7 +87,7 @@ Each tab generates a 256-bit credential with Web Crypto. The credential is sent 
 
 Stored Stage 1 rooms upgrade lazily when their Durable Object wakes; no room reset, replacement namespace or new SQLite class migration is required. Existing round question text, answers, participant IDs, imposter, deadlines and host order are retained. Missing disconnect timestamps are initialized to upgrade time, conservatively granting legacy offline players a fresh 90 seconds before removal. Normal hibernation preserves timestamps; reconnection clears them. A restart that actually loses sockets starts the offline interval when the loss is detected.
 
-Question pairs now have stable IDs in `worker/questions.ts`. Keep an ID attached to its pair when reordering; add new unique IDs and retire pairs by removing their entries. Never reuse an ID for different questions. **Do not edit or reorder `LEGACY_QUESTION_IDS`**: it is the frozen mapping of Stage 1 indices to IDs. Migration converts `usedQuestions` to `usedQuestionIds` once and retains the old field. Selection considers currently available unused IDs rather than comparing history length with bank size. New pairs remain eligible; removed IDs cannot break cycle exhaustion. A running round uses its saved question text even if that pair is retired later. All 18 original pairs remain unchanged.
+Question pairs have permanent IDs in `worker/questions.ts`. Keep an ID attached to its pair when reordering; add new unique IDs and retire pairs by removing their entries. Never reuse an ID for different questions. **Do not edit or reorder `LEGACY_QUESTION_IDS`**: it is the frozen mapping of Stage 1 indices to IDs. Migration converts `usedQuestions` to `usedQuestionIds` once and retains the old field. Stage 4 retains that history for compatibility but uses the singleton deck for selection. New IDs are shuffled into the remaining global deck; retired IDs are skipped, and used IDs remain excluded until the cycle ends. Existing rounds and allocation retries use their saved text even if the pair is retired. The original 18 pairs are retired from new selection; their historical IDs and existing snapshots remain valid. See [the maintenance procedure](docs/QUESTION_ROTATION.md) before editing the bank.
 
 ## Public endpoint abuse protection
 
@@ -99,15 +106,15 @@ No Cloudflare dashboard setting, paid WAF rule, account subdomain change or secr
 
 ## Eventual Cloudflare deployment
 
-The application is already live through the owner's GitHub/Cloudflare publishing workflow. **This Stage 2 update has not been committed, pushed or deployed.** For reference, the manual publishing steps are:
+The application is already live through the owner's GitHub/Cloudflare publishing workflow. **This Stage 4 update has not been committed, pushed or deployed.** For reference, the manual publishing steps are:
 
 1. Use a Cloudflare account with Workers Free and SQLite Durable Objects support. Stay within [Workers Free limits](https://developers.cloudflare.com/workers/platform/limits/) and [Durable Objects allowances](https://developers.cloudflare.com/durable-objects/platform/pricing/); free hosting has finite quotas.
 2. Run `npx wrangler login` yourself. Keep credentials outside this repository.
-3. Run `npm run typecheck`, `npm run test`, and then `npm run deploy` yourself.
-4. Wrangler applies migration `v1` for the `Room` class and publishes the frontend and backend as one Worker. The Vite-generated deployment configuration points at `dist/imposter/index.js` and `dist/client`.
+3. Run `npm run typecheck`, `npm run test`, `npm run build`, and the question-bank privacy check. Use your existing publishing workflow when ready.
+4. Preserve the existing `Room` binding and migration `v1`. The appended `v2-question-rotation` migration adds only the new SQLite `QuestionRotation` class and binding. The Vite-generated deployment configuration points at `dist/imposter/index.js` and `dist/client`.
 5. Use the printed HTTPS URL on separate devices. Verify reconnection, host transfer and timed reveals on the hosted runtime before sharing widely.
 
-The app needs no external databases, purchased services or project secrets. Local rooms and tokens are not uploaded during deployment. Keep the existing `Room` binding, Worker identity and migration `v1`; do not delete room storage or create a replacement namespace to apply Stage 2. Future persisted-state schema changes must be designed before publishing a replacement Worker.
+The app needs no external databases, purchased services, project secrets or new dashboard settings. Local rooms and tokens are not uploaded during deployment. Keep the existing `Room` binding, Worker identity and migration `v1`; do not delete room storage or create a replacement namespace. Keep the new coordinator binding and fixed singleton name stable after publishing. The first Stage 4 allocation initializes a fresh global cycle; pre-upgrade rooms retain their current rounds, but historical per-room usage cannot reconstruct a global deck. Refresh older open tabs for stale-start protection. Do not roll back to a selector that bypasses the coordinator if global uniqueness must be retained. See [migration and failure limitations](docs/QUESTION_ROTATION.md).
 
 Official references: [Cloudflare Vite plugin](https://developers.cloudflare.com/workers/vite-plugin/get-started/), [WebSocket Hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/), [Durable Object alarms](https://developers.cloudflare.com/durable-objects/api/alarms/), [Workers Vitest integration](https://developers.cloudflare.com/workers/testing/vitest-integration/).
 
@@ -116,5 +123,7 @@ Official references: [Cloudflare Vite plugin](https://developers.cloudflare.com/
 Automated tests exercise permissions, question/answer privacy, answer and round deadlines, repeated alarms, early and duplicate reveals, non-repeating questions, capacity, duplicate names, host succession, expired rooms, invalid requests and credentials, real WebSocket synchronization, persisted answers, and actual Durable Object eviction with hibernating sockets.
 
 Stage 2 additionally tests invite generation across origins, invalid links, real Join form prefilling and explicit submission, preservation of existing tab sessions, QR SVG payload equivalence and clipboard fallback, modal rerenders/focus restoration, notice expiry, offline permissions/removal thresholds, both reconnect/removal orderings, revoked-token persistence, active-round history, lazy Stage 1 upgrades, question-bank reorder/add/remove scenarios, real local rate-limit thresholds, shared-Wi-Fi joining, unknown-room probes, 429 responses and reconnect/heartbeat exemptions. UI tests use jsdom with a small native-dialog shim; browser checks cover the real modal behavior.
+
+Stage 4 adds actual SQLite coordinator tests for the full 250-pair cycle, concurrent distinct/duplicate RPC calls, eviction, permanent snapshot replay, bank changes, empty-bank errors and transaction rollback; cross-room socket tests cover rejected starts, stale requests, lost replies, failed room saves and expiry during allocation. Bank checks cover approved wording, permanent IDs, category balance and unique question text. Production client assets are checked against all 500 backend strings. Current Stage 4 evidence is automated/local; prior-stage browser checks are historical and have not been repeated as hosted or physical-device verification.
 
 The Stage 1 local three-tab browser smoke test covered creation/joining, a complete round, private questions, refresh after answering, discussion, confirmed reveal, a second round, reveal during answering and host departure. The Stage 2 browser check covered invite-prefilled entry, explicit joining in another tab, session protection when opening another room's invite, the real QR modal, clipboard copy, Escape/focus restoration, focus retained through clock updates, offline removal after the real 90-second grace, public removal notification and its expiry. Physical phone-camera scans, hosted Cloudflare behavior, long-session reliability and a full accessibility audit remain unverified. Twenty-minute deadlines are exercised by advancing server time in automated tests, not by waiting twenty real minutes in the browser.

@@ -16,19 +16,28 @@
 | `public/fonts/` | Self-hosted Barlow fonts, SIL OFL license and provenance |
 | `public/favicon.svg` | Original redacted-zero app icon |
 | `scripts/check-design.mjs` | Dependency-free palette contrast and CSS safeguard checks |
+| `scripts/check-question-bank.mjs` | Checks the production client assets against every private backend question string |
 | `shared/protocol.ts` | Explicit player-visible state and permitted wire actions; no backend secrets |
 | `worker/index.ts` | Same-origin API router, request validation, Durable Object persistence, hibernating sockets and alarms |
 | `worker/game.ts` | Authoritative rules, lazy room upgrades, offline removal/revocation, host succession, time transitions and filtered views |
-| `worker/questions.ts` | Backend-only stable pair IDs and frozen Stage 1 index mapping |
+| `worker/questions.ts` | 250 backend-only pairs, editorial metadata, permanent IDs and frozen Stage 1 index mapping |
+| `worker/rotationDeck.ts` | Pure randomized deck transitions, cycle boundaries and bank reconciliation |
+| `worker/questionRotation.ts` | Singleton SQLite coordinator, atomic deck/ledger writes and durable allocation retries |
 | `worker/rateLimit.ts` | Built-in public endpoint limit enforcement and trusted client key selection |
 | `tests/game.test.ts` | Deterministic game-rule/privacy tests |
 | `tests/room.test.ts` | Real Workers runtime, SQLite storage, sockets, hibernation and alarm integration tests |
 | `tests/stability.test.ts` | Offline removal/races, legacy state and question-bank upgrades, notice expiry |
+| `tests/globalRotation.test.ts` | Pure deck transitions and actual SQLite coordinator concurrency, retries, bank edits and eviction |
+| `tests/questionBank.test.ts` | Exact count, permanent IDs, approved examples, category balance and text quality safeguards |
 | `tests/rateLimit.test.ts` | Real local limiter bindings, error handling, shared networks and reconnect exemptions |
 | `tests/ui.test.tsx` | Invite form/session protection, QR payload, confirmations, focus, notices and removal UI |
 | `tests/ui.setup.tsx` | jsdom dialog shim and isolated UI cleanup |
 | `vite.config.ts` | Official Cloudflare Vite integration and React |
 | `wrangler.jsonc` | Combined assets/Worker deployment and SQLite class migration |
 | `vitest.config.ts` | Separate disposable Workers and jsdom test projects, independent of local game state |
+| `docs/QUESTION_ROTATION.md` | Bank maintenance, deployment compatibility, crash recovery and operational limitations |
+| `docs/QUESTION_BANK_REVIEW.md` | Editorial review, category totals and 20 strongest original additions |
 
 Flow: browser POST → Worker route → room Durable Object → validated rule transition → durable record + next alarm → per-player WebSocket views. Alarms use the same deadline transitions. Only `view()` may construct a player snapshot; never broadcast the stored room record.
+
+Round start: host action → room validation → saved pending intent (`room-instance UUID:next round`) → singleton coordinator RPC → atomic SQLite deck/allocation reservation → saved oriented room snapshot/alarm → private player views. Room expiry deletes only that room's storage; the coordinator persists independently. No transaction spans both objects.

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { act, advance, ANSWER_MS, ABANDON_MS, connect, createGame, disconnect, HOST_GRACE_MS, join, member, nextDeadline, ROUND_MS, ROOM_LIFETIME_MS, secret, view, type Game } from '../worker/game';
+import { act, advance, ANSWER_MS, ABANDON_MS, connect, createGame, disconnect, HOST_GRACE_MS, join, member, nextDeadline, ROUND_MS, ROOM_LIFETIME_MS, secret, upgradeGame, validateStart, view, type Game } from '../worker/game';
 import { QUESTIONS } from '../worker/questions';
+import { drawQuestion, type RotationDeck } from '../worker/rotationDeck';
 
 const T = 1_000_000;
 function lobby(count = 3) {
@@ -9,7 +10,15 @@ function lobby(count = 3) {
   players.forEach(p => connect(game, p.id));
   return { game, players, host: players[0] };
 }
-function start(game: Game, hostId: string, now = T) { act(game, hostId, { type: 'start' }, now, () => 0); }
+const decks = new WeakMap<Game, RotationDeck>();
+function start(game: Game, hostId: string, now = T, choose = (_length: number) => 0) {
+  advance(game, now);
+  validateStart(game, hostId);
+  const key = `${game.roomInstanceId}:${(game.round?.number ?? 0) + 1}`;
+  const selection = drawQuestion(decks.get(game) ?? null, key, QUESTIONS, length => length - 1);
+  act(game, hostId, { type: 'start' }, now, choose, selection.allocation);
+  decks.set(game, selection.deck);
+}
 function end(game: Game, hostId: string, now = T) { act(game, hostId, { type: 'reveal', round: game.round!.number }, now); }
 
 describe('rooms and membership', () => {
@@ -49,6 +58,11 @@ describe('rooms and membership', () => {
 });
 
 describe('round permissions, privacy and timing', () => {
+  it('does not start a valid lobby without a server question allocation', () => {
+    const { game, host } = lobby();
+    expect(() => act(game, host.id, { type: 'start' }, T)).toThrow('server question allocation');
+    expect(game.round).toBeNull(); expect(game.usedQuestionIds).toEqual([]);
+  });
   it('requires the host and at least three connected players', () => {
     const { game, host, players } = lobby(2);
     expect(() => start(game, players[1].id)).toThrow('Only the host');
@@ -122,7 +136,22 @@ describe('round permissions, privacy and timing', () => {
       start(game, host.id); seen.add(game.round!.questions[0]); end(game, host.id);
     }
     expect(seen.size).toBeGreaterThanOrEqual(15); expect(seen.size).toBe(QUESTIONS.length);
-    start(game, host.id); expect(game.usedQuestionIds).toHaveLength(1);
+    start(game, host.id); expect(game.round!.questionCycle).toBe(2); expect(game.usedQuestionIds).toHaveLength(QUESTIONS.length);
+  });
+  it.each([0, 1])('preserves backend question orientation %s through snapshots and public reveal', orientation => {
+    const { game, host, players } = lobby();
+    start(game, host.id, T, length => length === 2 ? orientation : 0);
+    const ordered = orientation === 0 ? QUESTIONS[0].questions : [...QUESTIONS[0].questions].reverse();
+    expect(game.round!.questions).toEqual(ordered);
+    expect(view(game, host.id, T).question).toBe(ordered[1]);
+    expect(view(game, players[1].id, T).question).toBe(ordered[0]);
+    expect(view(game, players[2].id, T).question).toBe(ordered[0]);
+    const restored = JSON.parse(JSON.stringify(game)) as Game;
+    upgradeGame(restored, T + 1);
+    expect(restored.round!.questions).toEqual(ordered);
+    expect(view(restored, host.id, T + 1).reveal).toBeNull();
+    end(restored, host.id, T + 1);
+    expect(restored.round!.reveal).toMatchObject({ normalQuestion: ordered[0], imposterQuestion: ordered[1] });
   });
   it('keeps departed participants in the round snapshot but revokes their permissions', () => {
     const { game, host, players } = lobby(); start(game, host.id);

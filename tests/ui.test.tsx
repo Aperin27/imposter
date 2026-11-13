@@ -188,7 +188,7 @@ describe('CASE FILE gameplay presentation', () => {
     const nickname = screen.getByLabelText('Your nickname'); fireEvent.change(nickname, { target: { value: 'Alex' } });
     await act(async () => fireEvent.submit(nickname.closest('form')!));
     const state = playing(); withRoom({ ...state, phase: 'lobby' }); rerender(<App />);
-    fireEvent.click(screen.getByRole('button', { name: 'Start round' })); expect(send).toHaveBeenLastCalledWith({ type: 'start' });
+    fireEvent.click(screen.getByRole('button', { name: 'Start round' })); expect(send).toHaveBeenLastCalledWith({ type: 'start', round: 1 });
     withRoom(state); rerender(<App />);
     expect(screen.getByRole('heading', { name: normalQuestion })).toBeTruthy();
     expect(screen.queryByText(otherQuestion)).toBeNull(); expect(screen.queryByText('THE IMPOSTER WAS…')).toBeNull();
@@ -211,7 +211,7 @@ describe('CASE FILE gameplay presentation', () => {
     expect(screen.getByRole('heading', { name: 'Blair' })).toBeTruthy();
     expect(screen.getByRole('heading', { name: normalQuestion })).toBeTruthy(); expect(screen.getByRole('heading', { name: otherQuestion })).toBeTruthy();
     expect(screen.getByText('Seven')).toBeTruthy(); expect(screen.getByText('Eight')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Next round' })); expect(send).toHaveBeenLastCalledWith({ type: 'start' });
+    fireEvent.click(screen.getByRole('button', { name: 'Next round' })); expect(send).toHaveBeenLastCalledWith({ type: 'start', round: 1 });
     withRoom({ ...state, roundNumber: 2, question: 'A fresh assignment?' }); rerender(<App />);
     expect(screen.getByRole('heading', { name: 'A fresh assignment?' })).toBeTruthy();
     expect((screen.getByLabelText('Your answer') as HTMLInputElement).value).toBe(''); expect(screen.queryByText('Eight')).toBeNull();

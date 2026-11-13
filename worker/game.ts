@@ -1,5 +1,6 @@
 import { NOTICE_MS, OFFLINE_REMOVAL_MS, type Action, type Phase, type RoomNotice, type RoomView } from '../shared/protocol';
-import { LEGACY_QUESTION_IDS, QUESTIONS, type QuestionPair } from './questions';
+import { LEGACY_QUESTION_IDS } from './questions';
+import type { QuestionAllocation } from './rotationDeck';
 
 export const ANSWER_MS = 90_000;
 export const ROUND_MS = 20 * 60_000;
@@ -18,6 +19,8 @@ interface Round {
   answers: Record<string, string>; answerDeadline: number; deadline: number;
   reveal: RoomView['reveal'];
   questionId?: string;
+  allocationKey?: string;
+  questionCycle?: number;
 }
 export interface Game {
   code: string; createdAt: number; expiresAt: number; abandonedAt: number | null;
@@ -27,8 +30,11 @@ export interface Game {
   usedQuestionIds?: string[];
   revokedTokens?: string[];
   notice?: RoomNotice | null;
+  roomInstanceId?: string;
+  pendingStart?: { key: string; roundNumber: number } | null;
 }
 export function upgradeGame(game: Game, now: number): Game {
+  game.roomInstanceId ??= crypto.randomUUID();
   game.usedQuestionIds ??= [...new Set(game.usedQuestions.flatMap(index =>
     Number.isInteger(index) && index >= 0 && index < LEGACY_QUESTION_IDS.length ? [LEGACY_QUESTION_IDS[index]] : []))];
   game.revokedTokens ??= [];
@@ -38,14 +44,6 @@ export function upgradeGame(game: Game, now: number): Game {
     if (player.disconnectedAt === undefined) player.disconnectedAt = player.connected || player.left ? null : now;
   }
   return game;
-}
-export function chooseQuestion(usedIds: readonly string[], choose = randomIndex, bank: readonly QuestionPair[] = QUESTIONS) {
-  if (!bank.length) throw new GameError('No question pairs are currently available.');
-  let history = [...usedIds];
-  let choices = bank.filter(pair => !history.includes(pair.id));
-  if (!choices.length) { history = []; choices = [...bank]; }
-  const pair = choices[choose(choices.length)];
-  return { pair, history: [...history, pair.id] };
 }
 export function randomIndex(length: number): number {
   // Rejection sampling avoids modulo bias.
@@ -68,7 +66,8 @@ export function nickname(value: unknown): string {
 export function createGame(code: string, now: number): Game {
   return { code, createdAt: now, expiresAt: now + ROOM_LIFETIME_MS, abandonedAt: now,
     players: [], nextOrder: 0, hostId: null, hostReconnectAt: null, hostNotice: null,
-    usedQuestions: [], usedQuestionIds: [], revokedTokens: [], notice: null, round: null };
+    usedQuestions: [], usedQuestionIds: [], revokedTokens: [], notice: null, round: null,
+    roomInstanceId: crypto.randomUUID(), pendingStart: null };
 }
 export function member(game: Game, token: string): Player {
   if (game.revokedTokens?.includes(token)) throw new GameError('Your offline player was removed by the host. Join again with a new session.');
@@ -145,7 +144,17 @@ export function nextDeadline(game: Game): number {
   if (game.round && game.round.phase !== 'revealed') deadlines.push(game.round.deadline);
   return Math.min(...deadlines);
 }
-export function act(game: Game, id: string, action: Action, now: number, choose = randomIndex) {
+export function validateStart(game: Game, id: string, expectedRound?: number) {
+  const player = game.players.find(p => p.id === id && !p.left && p.connected);
+  if (!player) throw new GameError('Reconnect before taking an action.');
+  if (game.hostId !== id) throw new GameError('Only the host can do that.');
+  if (expectedRound !== undefined && (!Number.isInteger(expectedRound) || expectedRound !== (game.round?.number ?? 0))) {
+    throw new GameError('That start request belongs to an older round. Refresh the room and try again.');
+  }
+  if (game.round && game.round.phase !== 'revealed') throw new GameError('Finish the current round first.');
+  if (game.players.filter(p => p.connected && !p.left).length < 3) throw new GameError('At least three connected players are needed.');
+}
+export function act(game: Game, id: string, action: Action, now: number, choose = randomIndex, allocation?: QuestionAllocation) {
   advance(game, now);
   const player = game.players.find(p => p.id === id && !p.left && (p.connected || action.type === 'leave'));
   if (!player) throw new GameError('Reconnect before taking an action.');
@@ -175,18 +184,21 @@ export function act(game: Game, id: string, action: Action, now: number, choose 
     return;
   }
   if (action.type === 'start') {
-    if (game.round && game.round.phase !== 'revealed') throw new GameError('Finish the current round first.');
+    validateStart(game, id, action.round);
+    if (!allocation) throw new GameError('A server question allocation is required.');
     const players = game.players.filter(p => p.connected && !p.left);
-    if (players.length < 3) throw new GameError('At least three connected players are needed.');
     // Left players have no future permissions; their historical names live in the round snapshot.
     game.players = game.players.filter(p => !p.left);
     upgradeGame(game, now);
-    const selection = chooseQuestion(game.usedQuestionIds!, choose);
-    game.usedQuestionIds = selection.history;
+    game.usedQuestionIds = [...new Set([...game.usedQuestionIds!, allocation.id])];
+    const questions: readonly [string, string] = choose(2) === 0
+      ? [...allocation.questions] : [allocation.questions[1], allocation.questions[0]];
     game.round = { number: (game.round?.number ?? 0) + 1, phase: 'answering',
       participants: players.map(p => ({ id: p.id, nickname: p.nickname })),
-      imposterId: players[choose(players.length)].id, questions: selection.pair.questions, questionId: selection.pair.id,
+      imposterId: players[choose(players.length)].id, questions, questionId: allocation.id,
+      allocationKey: allocation.key, questionCycle: allocation.cycle,
       answers: {}, answerDeadline: now + ANSWER_MS, deadline: now + ROUND_MS, reveal: null };
+    game.pendingStart = null;
     return;
   }
   const round = game.round;

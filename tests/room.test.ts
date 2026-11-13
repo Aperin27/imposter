@@ -4,10 +4,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker, { type Env } from '../worker/index';
 import { ABANDON_MS, ANSWER_MS, HOST_GRACE_MS, ROUND_MS, secret, type Game } from '../worker/game';
 import type { Action, RoomView, ServerMessage } from '../shared/protocol';
+import { ROTATION_SINGLETON } from '../worker/questionRotation';
 
 const bindings = env as unknown as Env;
 const sockets: WebSocket[] = [];
 const origin = 'https://imposter.test';
+const coordinator = () => bindings.QUESTION_ROTATION.get(bindings.QUESTION_ROTATION.idFromName(ROTATION_SINGLETON));
+const allocationCount = () => runInDurableObject(coordinator(), (_instance, ctx) =>
+  ctx.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM question_allocations').one().count);
+const savedGame = (stub: DurableObjectStub) => runInDurableObject(stub, (_instance, ctx) => ctx.storage.get<Game>('game'));
 async function request(path: string, data: unknown, headers: Record<string, string> = {}) {
   const response = await worker.fetch(new Request(origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, ...headers }, body: JSON.stringify(data) }), bindings);
   // Drain DO response streams so an unread body cannot keep an eviction in flight.
@@ -83,6 +88,105 @@ afterEach(async () => {
 });
 
 describe('Worker and SQLite Durable Object integration', () => {
+  it('shares one deck across concurrent room starts and rejects invalid/stale starts before allocation', async () => {
+    const groups = await Promise.all([group(), group(), group()]);
+    groups[0].second.send({ type: 'start', round: 0 }); await groups[0].second.error('Only the host');
+    expect(await allocationCount()).toBe(0);
+    for (const current of groups) current.host.send({ type: 'start', round: 0 });
+    await Promise.all(groups.map(current => current.host.state(s => s.phase === 'answering')));
+    const saved = await Promise.all(groups.map(current => savedGame(current.stub)));
+    expect(new Set(saved.map(game => game!.round!.questionId)).size).toBe(3);
+    expect(new Set(saved.map(game => game!.round!.questionCycle))).toEqual(new Set([1]));
+    expect(await allocationCount()).toBe(3);
+    const first = groups[0];
+    first.host.send({ type: 'start', round: 0 }); await first.host.error('older round');
+    first.host.send({ type: 'reveal', round: 1 }); await first.host.state(s => s.phase === 'revealed');
+    first.host.send({ type: 'start', round: 0 }); await first.host.error('older round');
+    expect(await allocationCount()).toBe(3);
+  });
+  it('does not allocate for too few connected members or while a round is running', async () => {
+    const current = await group();
+    current.third.ws.close();
+    await current.host.state(s => s.players.filter(p => p.connected).length === 2);
+    current.host.send({ type: 'start', round: 0 }); await current.host.error('At least three');
+    expect(await allocationCount()).toBe(0);
+    const third = await socket(current.code, current.tokens[2]); await third.state();
+    current.host.send({ type: 'start', round: 0 }); await current.host.state(s => s.phase === 'answering');
+    current.host.send({ type: 'start', round: 1 }); await current.host.error('Finish');
+    expect(await allocationCount()).toBe(1);
+  });
+  it.each(['before-allocation', 'lost-reply', 'room-save'] as const)('recovers %s failure with one durable start key across room eviction', async failure => {
+    const current = await group();
+    if (failure === 'room-save') {
+      await runInDurableObject(current.stub, instance => {
+        const target = instance as unknown as { persist: (candidate?: Game | null) => Promise<void> };
+        const original = target.persist.bind(target);
+        let once = true;
+        vi.spyOn(target, 'persist').mockImplementation(async candidate => {
+          if (once && candidate?.round?.phase === 'answering') { once = false; throw new Error('Simulated room commit failure'); }
+          await original(candidate);
+        });
+      });
+    } else {
+      await runInDurableObject(coordinator(), instance => {
+        const original = instance.allocate.bind(instance);
+        vi.spyOn(Object.getPrototypeOf(instance) as typeof instance, 'allocate').mockImplementationOnce(key => {
+          if (failure === 'lost-reply') original(key);
+          throw new Error('Simulated coordinator reply failure');
+        });
+      });
+    }
+    current.host.send({ type: 'start', round: 0 });
+    await current.host.error(failure === 'room-save' ? 'could not be saved' : 'temporarily unavailable');
+    const pending = (await savedGame(current.stub))!;
+    expect(pending.round).toBeNull(); expect(pending.pendingStart?.roundNumber).toBe(1);
+    const key = pending.pendingStart!.key;
+    expect(await allocationCount()).toBe(failure === 'before-allocation' ? 0 : 1);
+    await evictDurableObject(current.stub);
+    current.host.send({ type: 'start', round: 0 });
+    await current.host.state(s => s.phase === 'answering');
+    const recovered = (await savedGame(current.stub))!;
+    expect(recovered.round!.allocationKey).toBe(key); expect(recovered.pendingStart).toBeNull();
+    const ledger = await coordinator().allocate(key);
+    expect(recovered.round!.questionId).toBe(ledger.id);
+    expect(new Set(recovered.round!.questions)).toEqual(new Set(ledger.questions));
+    expect(await allocationCount()).toBe(1);
+  });
+  it('keeps rotation progress through room expiry and reuse of the same room code', async () => {
+    const current = await group(); current.host.send({ type: 'start', round: 0 });
+    await current.host.state(s => s.phase === 'answering');
+    const original = (await savedGame(current.stub))!;
+    const time = vi.spyOn(Date, 'now').mockReturnValue(original.expiresAt);
+    await runDurableObjectAlarm(current.stub);
+    expect(await savedGame(current.stub)).toBeUndefined(); expect(await allocationCount()).toBe(1);
+    time.mockRestore();
+    const token = secret();
+    const recreated = await current.stub.fetch('https://room/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: current.code, nickname: 'New Host', token }) });
+    expect(recreated.status).toBe(201); await recreated.arrayBuffer();
+    const host = await socket(current.code, token);
+    for (const nickname of ['New second', 'New third']) {
+      const next = secret(); await request(`/api/rooms/${current.code}/join`, { token: next, nickname }); await socket(current.code, next);
+    }
+    await host.state(s => s.players.filter(p => p.connected).length === 3);
+    host.send({ type: 'start', round: 0 }); await host.state(s => s.phase === 'answering');
+    const saved = (await savedGame(current.stub))!;
+    expect(saved.roomInstanceId).not.toBe(original.roomInstanceId);
+    expect(saved.round!.allocationKey).not.toBe(original.round!.allocationKey);
+    expect(saved.round!.questionId).not.toBe(original.round!.questionId);
+    expect(saved.round!.questionCycle).toBe(1); expect(await allocationCount()).toBe(2);
+  });
+  it('does not start a room that expires while waiting for its reserved allocation', async () => {
+    const current = await group(); const expiry = (await savedGame(current.stub))!.expiresAt;
+    await runInDurableObject(coordinator(), instance => {
+      const original = instance.allocate.bind(instance);
+      vi.spyOn(Object.getPrototypeOf(instance) as typeof instance, 'allocate').mockImplementationOnce(key => {
+        const allocation = original(key); vi.spyOn(Date, 'now').mockReturnValue(expiry); return allocation;
+      });
+    });
+    current.host.send({ type: 'start', round: 0 });
+    await current.host.message(message => message.type === 'expired');
+    expect(await savedGame(current.stub)).toBeUndefined(); expect(await allocationCount()).toBe(1);
+  });
   it('runs a complete private round over real sockets and starts another', async () => {
     const { code, host, second, third } = await group();
     second.send({ type: 'start' }); await second.error('Only the host');
@@ -126,6 +230,28 @@ describe('Worker and SQLite Durable Object integration', () => {
     await third.state(s => s.phase === 'revealed');
     const result = await resumed.state(s => s.phase === 'revealed');
     expect(result.answers?.find(a => a.playerId === answered.you)?.answer).toBe('Saved privately');
+  });
+  it('recovers the same assigned questions and answer after a restart that drops every socket', async () => {
+    const current = await group();
+    current.host.send({ type: 'start', round: 0 });
+    await current.host.state(state => state.phase === 'answering');
+    current.second.send({ type: 'answer', round: 1, answer: 'Survives socket loss' });
+    await current.second.state(state => state.yourAnswer === 'Survives socket loss');
+    const before = (await savedGame(current.stub))!;
+    await evictDurableObject(current.stub, { webSockets: 'close' });
+    await evictDurableObject(coordinator());
+    const host = await socket(current.code, current.tokens[0]);
+    const second = await socket(current.code, current.tokens[1]);
+    const recovered = await second.state(state => state.phase === 'answering');
+    expect(recovered.yourAnswer).toBe('Survives socket loss');
+    const after = (await savedGame(current.stub))!;
+    expect(after.roomInstanceId).toBe(before.roomInstanceId);
+    expect(after.round).toEqual(before.round);
+    expect(after.hostId).toBe(before.hostId);
+    expect(await allocationCount()).toBe(1);
+    expect((await coordinator().allocate(before.round!.allocationKey!)).id).toBe(before.round!.questionId);
+    host.send({ type: 'start', round: 0 }); await host.error('older round');
+    expect(await allocationCount()).toBe(1);
   });
   it('alarms advance answer and round deadlines without any client action', async () => {
     const { host, second, stub } = await group();

@@ -1,11 +1,15 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { Action, ServerMessage } from '../shared/protocol';
-import { act, advance, connect, createGame, disconnect, GameError, join, member, nextDeadline, randomIndex, upgradeGame, view, type Game } from './game';
+import { act, advance, connect, createGame, disconnect, GameError, join, member, nextDeadline, randomIndex, upgradeGame, validateStart, view, type Game } from './game';
 import { enforcePublicLimit, publicClientKey, PublicRequestError } from './rateLimit';
+import { QuestionRotation, ROTATION_SINGLETON } from './questionRotation';
+import type { QuestionAllocation } from './rotationDeck';
+export { QuestionRotation };
 
 export interface Env {
   ROOMS: DurableObjectNamespace<Room>; ASSETS: Fetcher;
   CREATE_ROOM_LIMITER: RateLimit; JOIN_ROOM_LIMITER: RateLimit;
+  QUESTION_ROTATION: DurableObjectNamespace<QuestionRotation>;
 }
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const json = (data: unknown, status = 200) => Response.json(data, {
@@ -121,13 +125,43 @@ export class Room extends DurableObject<Env> {
       }
     }
   }
-  private async persist() {
-    if (!this.game) return;
-    const game = this.game;
+  private async persist(game = this.game) {
+    if (!game) return;
     await this.ctx.storage.transaction(async storage => {
       await storage.put('game', game);
       await storage.setAlarm(nextDeadline(game));
     });
+  }
+  private async startRound(playerId: string, expectedRound?: number) {
+    const game = this.game!;
+    validateStart(game, playerId, expectedRound);
+    const roundNumber = (game.round?.number ?? 0) + 1;
+    // Persist the intent before crossing the DO boundary. A retry uses this same key.
+    game.pendingStart ??= { key: `${game.roomInstanceId}:${roundNumber}`, roundNumber };
+    if (game.pendingStart.roundNumber !== roundNumber) throw new GameError('The pending round cannot be recovered. Reconnect and try again.');
+    await this.persist();
+    const key = game.pendingStart.key;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let allocation: QuestionAllocation;
+    try {
+      const coordinator = this.env.QUESTION_ROTATION.get(this.env.QUESTION_ROTATION.idFromName(ROTATION_SINGLETON));
+      const response = await Promise.race([
+        coordinator.allocate(key),
+        new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error('Allocation timed out')), 8000); }),
+      ]);
+      if (response.key !== key || !response.id || response.questions?.length !== 2
+        || response.questions.some(question => typeof question !== 'string' || !question.trim())) throw new Error('Invalid allocation');
+      allocation = { key, id: response.id, cycle: response.cycle, questions: [response.questions[0], response.questions[1]] };
+    } catch {
+      if (await this.expireIfDue()) return;
+      throw new GameError('Question rotation is temporarily unavailable. Try Start round again. Your room is safe.');
+    } finally { clearTimeout(timeout); }
+    if (await this.expireIfDue() || !this.game) return;
+    const candidate = structuredClone(this.game);
+    act(candidate, playerId, { type: 'start', round: expectedRound }, Date.now(), randomIndex, allocation);
+    try { await this.persist(candidate); }
+    catch { throw new GameError('The round could not be saved. Try Start round again. Your question reservation is safe.'); }
+    this.game = candidate;
   }
   private async expireIfDue(): Promise<boolean> {
     if (!this.game || !advance(this.game, Date.now())) return false;
@@ -222,8 +256,9 @@ export class Room extends DurableObject<Env> {
         let action: Action;
         try { action = JSON.parse(message) as Action; } catch { throw new GameError('Invalid action.'); }
         if (!action || !['start', 'answer', 'reveal', 'leave', 'removeOffline'].includes(action.type)) throw new GameError('Unknown action.');
-        act(this.game, attachment.playerId, action, Date.now());
-        await this.persist(); this.broadcast();
+        if (action.type === 'start') await this.startRound(attachment.playerId, action.round);
+        else { act(this.game, attachment.playerId, action, Date.now()); await this.persist(); }
+        this.broadcast();
         if (action.type === 'leave') {
           ws.serializeAttachment({ ...attachment, active: false });
           this.send(ws, { type: 'left' }); ws.close(1000, 'Left room');

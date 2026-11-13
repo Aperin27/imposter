@@ -36,7 +36,7 @@ export interface RoomView {
     revealedBy: string | null;
   } | null;
 }
-export type Action = { type: 'start' } | { type: 'answer'; answer: string; round: number }
+export type Action = { type: 'start'; round?: number } | { type: 'answer'; answer: string; round: number }
   | { type: 'reveal'; round: number } | { type: 'leave' }
   | { type: 'removeOffline'; playerId: string; disconnectedAt: number };
 export type ServerMessage = { type: 'state'; state: RoomView }

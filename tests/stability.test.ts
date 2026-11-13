@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { NOTICE_MS, OFFLINE_REMOVAL_MS, type Action } from '../shared/protocol';
-import { act, chooseQuestion, connect, createGame, disconnect, join, member, secret, upgradeGame, view } from '../worker/game';
+import { act, advance, connect, createGame, disconnect, join, member, secret, upgradeGame, validateStart, view, type Game } from '../worker/game';
 import { LEGACY_QUESTION_IDS, QUESTIONS, type QuestionPair } from '../worker/questions';
+import { drawQuestion, type RotationDeck } from '../worker/rotationDeck';
 
 const T = 1_000_000;
 function lobby(count = 3) {
@@ -10,6 +11,17 @@ function lobby(count = 3) {
   players.forEach(player => connect(game, player.id, T));
   return { game, players, host: players[0], target: players[1] };
 }
+
+const decks = new WeakMap<Game, RotationDeck>();
+function start(game: Game, hostId: string, now = T, choose = (_length: number) => 0) {
+  advance(game, now);
+  validateStart(game, hostId);
+  const selection = drawQuestion(decks.get(game) ?? null,
+    `${game.roomInstanceId}:${(game.round?.number ?? 0) + 1}`, QUESTIONS, length => length - 1);
+  act(game, hostId, { type: 'start' }, now, choose, selection.allocation);
+  decks.set(game, selection.deck);
+}
+
 describe('offline removal', () => {
   it('allows only the current host after a full 90 seconds offline', () => {
     const { game, players, host, target } = lobby();
@@ -49,7 +61,7 @@ describe('offline removal', () => {
   });
   it('keeps the removed imposter, submitted answers, questions and deadlines in round history', () => {
     const { game, host, target } = lobby();
-    act(game, host.id, { type: 'start' }, T, length => length === 3 ? 1 : 0);
+    start(game, host.id, T, length => length === 3 ? 1 : 0);
     expect(game.round!.imposterId).toBe(target.id);
     act(game, target.id, { type: 'answer', round: 1, answer: 'Historical answer' }, T);
     const roundBefore = structuredClone(game.round);
@@ -62,7 +74,7 @@ describe('offline removal', () => {
     expect(game.round!.reveal?.imposterName).toBe(target.nickname);
     const newPlayer = join(game, target.nickname, secret(), T + OFFLINE_REMOVAL_MS);
     connect(game, newPlayer.id, T + OFFLINE_REMOVAL_MS);
-    act(game, host.id, { type: 'start' }, T + OFFLINE_REMOVAL_MS);
+    start(game, host.id, T + OFFLINE_REMOVAL_MS);
     expect(game.round!.number).toBe(2);
     expect(game.round!.participants.map(p => p.id)).not.toContain(target.id);
   });
@@ -76,46 +88,54 @@ describe('offline removal', () => {
 describe('stored-room and question bank upgrades', () => {
   it('upgrades Stage 1 indices once without changing an active round or host grace', () => {
     const { game, host, target } = lobby();
-    act(game, host.id, { type: 'start' }, T, () => 0);
+    start(game, host.id);
     act(game, target.id, { type: 'answer', round: 1, answer: 'Saved' }, T);
     disconnect(game, host.id, T);
     game.usedQuestions = [0, 3, 17, 3, -1, 100, 1.5];
-    delete game.usedQuestionIds; delete game.revokedTokens; delete game.notice;
+    const previousInstance = game.roomInstanceId;
+    delete game.usedQuestionIds; delete game.revokedTokens; delete game.notice; delete game.roomInstanceId; delete game.pendingStart;
     game.players.forEach(player => delete player.disconnectedAt);
     game.hostNotice = 'Old permanent host notice';
-    delete game.round!.questionId;
+    delete game.round!.questionId; delete game.round!.allocationKey; delete game.round!.questionCycle;
     const before = structuredClone(game.round); const grace = game.hostReconnectAt;
     const stored = JSON.parse(JSON.stringify(game));
     upgradeGame(stored, T + 40_000);
     expect(stored.usedQuestionIds).toEqual([LEGACY_QUESTION_IDS[0], LEGACY_QUESTION_IDS[3], LEGACY_QUESTION_IDS[17]]);
     expect(stored.round).toEqual(before); expect(stored.hostReconnectAt).toBe(grace);
+    expect(stored.roomInstanceId).toMatch(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/);
+    expect(stored.roomInstanceId).not.toBe(previousInstance);
     expect(stored.players[0].disconnectedAt).toBe(T + 40_000);
     expect(stored.players[1].disconnectedAt).toBeNull(); expect(stored.hostNotice).toBeNull();
     const after = structuredClone(stored); upgradeGame(stored, T + 80_000);
     expect(stored).toEqual(after);
   });
   it('keeps pair IDs unique and freezes the original index mapping', () => {
-    expect(QUESTIONS).toHaveLength(18);
-    expect(new Set(QUESTIONS.map(pair => pair.id)).size).toBe(18);
+    expect(QUESTIONS).toHaveLength(250);
+    expect(new Set(QUESTIONS.map(pair => pair.id)).size).toBe(250);
     expect(LEGACY_QUESTION_IDS).toEqual(['film-patience', 'plants-and-mugs', 'imaginary-friends', 'pizza-party', 'camera-roll', 'camping-dinners', 'alarms-and-chances', 'lateness-and-naps', 'ducks-and-children', 'mental-tabs', 'cushions-and-bags', 'bull-and-jokes', 'karaoke-memory', 'secrets-and-laughs', 'queues-and-books', 'hair-and-jackets', 'train-snacks', 'age-and-frying-pans']);
   });
   it('supports reordering, removal and additions without repeating available used IDs', () => {
     const extra: QuestionPair = { id: 'future-pair', questions: ['Normal future?', 'Alternative future?'] };
     const bank = [QUESTIONS[2], extra, QUESTIONS[0]];
-    let selection = chooseQuestion([QUESTIONS[0].id, QUESTIONS[1].id], () => 0, bank);
-    expect(selection.pair.id).toBe(QUESTIONS[2].id);
-    selection = chooseQuestion(selection.history, () => 0, [extra, QUESTIONS[0], QUESTIONS[2]]);
-    expect(selection.pair.id).toBe(extra.id);
-    selection = chooseQuestion(selection.history, () => 0, bank);
-    expect(selection.pair.id).toBe(QUESTIONS[2].id); expect(selection.history).toEqual([QUESTIONS[2].id]);
-    expect(() => chooseQuestion([], () => 0, [])).toThrow('No question');
+    const prior: RotationDeck = { cycle: 3, used: [QUESTIONS[0].id, QUESTIONS[1].id], remaining: [QUESTIONS[2].id], lastId: QUESTIONS[1].id };
+    let selection = drawQuestion(prior, 'first', bank, length => length - 1);
+    expect(selection.allocation.id).toBe(QUESTIONS[2].id);
+    expect(selection.deck.cycle).toBe(3);
+    selection = drawQuestion(selection.deck, 'second', [extra, QUESTIONS[0], QUESTIONS[2]], length => length - 1);
+    expect(selection.allocation.id).toBe(extra.id);
+    selection = drawQuestion(selection.deck, 'third', bank, length => length - 1);
+    expect(selection.allocation.id).toBe(QUESTIONS[2].id); expect(selection.deck.used).toEqual([QUESTIONS[2].id]);
+    expect(selection.deck.cycle).toBe(4);
+    expect(() => drawQuestion(null, 'empty', [], () => 0)).toThrow('No question');
   });
   it('does not let a retired ID or legacy history length break exhaustion detection', () => {
     const all = QUESTIONS.map(pair => pair.id);
-    const selection = chooseQuestion([...all, 'retired-id'], () => 0);
-    expect(selection.history).toEqual([QUESTIONS[0].id]);
+    const prior: RotationDeck = { cycle: 7, used: [...all, 'retired-id'], remaining: [], lastId: null };
+    const selection = drawQuestion(prior, 'next-cycle', QUESTIONS, length => length - 1);
+    expect(selection.deck.used).toEqual([QUESTIONS[0].id]); expect(selection.deck.cycle).toBe(8);
     const added: QuestionPair = { id: 'added', questions: ['N?', 'I?'] };
-    expect(chooseQuestion(all, () => 0, [...QUESTIONS, added]).pair).toBe(added);
+    expect(drawQuestion(prior, 'new-pair', [...QUESTIONS, added], length => length - 1).allocation.id).toBe(added.id);
+    expect(drawQuestion(prior, 'new-pair', [...QUESTIONS, added], length => length - 1).deck.cycle).toBe(7);
   });
   it('expires host/removal notices without replaying historical strings in snapshots', () => {
     const { game, host, players } = lobby();

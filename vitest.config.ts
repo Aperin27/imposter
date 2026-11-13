@@ -7,7 +7,7 @@ const workers = {
     main: './worker/index.ts',
     miniflare: {
       compatibilityDate: '2026-11-12',
-      durableObjects: { ROOMS: { className: 'Room', useSQLite: true } },
+      durableObjects: { ROOMS: { className: 'Room', useSQLite: true }, QUESTION_ROTATION: { className: 'QuestionRotation', useSQLite: true } },
       ratelimits: {
         CREATE_ROOM_LIMITER: { namespace_id: '41001', simple: { limit: 10, period: 60 } },
         JOIN_ROOM_LIMITER: { namespace_id: '41002', simple: { limit: 60, period: 60 } },
